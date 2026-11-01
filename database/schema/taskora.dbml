@@ -1,0 +1,875 @@
+// Taskora — Enterprise project management SaaS
+// DBML ERD for dbdiagram.io
+// Includes Transactional Outbox for reliable Celery event publishing.
+// PostgreSQL-specific behavior (partial indexes, triggers, RLS, enum/check details)
+// may need separate SQL migrations.
+
+Enum account_status {
+  pending_verification
+  active
+  suspended
+  deactivated
+}
+
+Enum membership_status {
+  invited
+  active
+  suspended
+  left
+}
+
+Enum resource_visibility {
+  private
+  workspace
+  organization
+  public
+}
+
+Enum board_role {
+  admin
+  editor
+  commenter
+  viewer
+}
+
+Enum workspace_role {
+  owner
+  admin
+  member
+  guest
+}
+
+Enum invitation_status {
+  pending
+  accepted
+  revoked
+  expired
+}
+
+Enum card_priority {
+  none
+  low
+  medium
+  high
+  urgent
+}
+
+Enum automation_status {
+  active
+  paused
+  disabled
+}
+
+Enum delivery_status {
+  pending
+  processing
+  delivered
+  failed
+  cancelled
+}
+
+Enum subscription_status {
+  trialing
+  active
+  past_due
+  paused
+  cancelled
+  incomplete
+  expired
+}
+
+// 1. Identity and authentication
+
+Table users {
+  id uuid [pk]
+  email varchar [not null, unique]
+  password_hash text
+  status account_status [not null, default: 'pending_verification']
+  email_verified_at timestamp
+  last_login_at timestamp
+  locale varchar(20) [not null, default: 'en']
+  timezone varchar(64) [not null, default: 'UTC']
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+  deleted_at timestamp
+}
+
+Table user_profiles {
+  user_id uuid [pk, ref: > users.id]
+  full_name varchar(160)
+  display_name varchar(80)
+  bio text
+  avatar_key text
+  job_title varchar(120)
+  department varchar(120)
+  phone varchar(40)
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+}
+
+Table user_identities {
+  id uuid [pk]
+  user_id uuid [not null, ref: > users.id]
+  provider varchar(40) [not null]
+  provider_subject varchar(255) [not null]
+  provider_email varchar
+  created_at timestamp [not null]
+  last_used_at timestamp
+
+  indexes {
+    (provider, provider_subject) [unique]
+    (user_id, provider) [unique]
+  }
+}
+
+Table user_sessions {
+  id uuid [pk]
+  user_id uuid [not null, ref: > users.id]
+  refresh_token_hash text [not null, unique]
+  user_agent text
+  ip_address varchar(45)
+  expires_at timestamp [not null]
+  revoked_at timestamp
+  created_at timestamp [not null]
+}
+
+Table user_mfa_methods {
+  id uuid [pk]
+  user_id uuid [not null, ref: > users.id]
+  method varchar(24) [not null]
+  secret_ciphertext text
+  credential_data json
+  verified_at timestamp
+  created_at timestamp [not null]
+}
+
+// 2. Organizations, memberships, invitations, roles
+
+Table organizations {
+  id uuid [pk]
+  name varchar(160) [not null]
+  slug varchar(160) [not null, unique]
+  created_by uuid [ref: > users.id]
+  settings json [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+  deleted_at timestamp
+}
+
+Table organization_memberships {
+  organization_id uuid [not null, ref: > organizations.id]
+  user_id uuid [not null, ref: > users.id]
+  role varchar(32) [not null, default: 'member']
+  status membership_status [not null, default: 'active']
+  joined_at timestamp
+  created_at timestamp [not null]
+
+  indexes {
+    (organization_id, user_id) [pk]
+    (user_id, status)
+  }
+}
+
+Table invitations {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.id]
+  workspace_id uuid
+  email varchar [not null]
+  invited_by uuid [ref: > users.id]
+  token_hash text [not null, unique]
+  role varchar(32) [not null, default: 'member']
+  status invitation_status [not null, default: 'pending']
+  expires_at timestamp [not null]
+  accepted_at timestamp
+  revoked_at timestamp
+  created_at timestamp [not null]
+
+  indexes {
+    (workspace_id, organization_id)
+    (organization_id, email, status)
+  }
+}
+
+Table roles {
+  id uuid [pk]
+  organization_id uuid [ref: > organizations.id]
+  name varchar(80) [not null]
+  scope varchar(24) [not null]
+  is_system boolean [not null, default: false]
+  created_at timestamp [not null]
+
+  indexes {
+    (organization_id, scope, name) [unique]
+    (id, organization_id) [unique]
+  }
+}
+
+Table permissions {
+  code varchar(100) [pk]
+  description text [not null]
+  resource_type varchar(40) [not null]
+}
+
+Table role_permissions {
+  role_id uuid [not null, ref: > roles.id]
+  permission_code varchar(100) [not null, ref: > permissions.code]
+
+  indexes {
+    (role_id, permission_code) [pk]
+  }
+}
+
+// 3. Workspaces
+
+Table workspaces {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.id]
+  name varchar(160) [not null]
+  slug varchar(160) [not null]
+  description text
+  created_by uuid [ref: > users.id]
+  settings json [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+  archived_at timestamp
+
+  indexes {
+    (organization_id, slug) [unique]
+    (id, organization_id) [unique]
+  }
+}
+
+Table workspace_memberships {
+  workspace_id uuid [not null]
+  organization_id uuid [not null]
+  user_id uuid [not null, ref: > users.id]
+  role workspace_role [not null, default: 'member']
+  status membership_status [not null, default: 'active']
+  created_at timestamp [not null]
+  joined_at timestamp
+
+  indexes {
+    (workspace_id, user_id) [pk]
+    (workspace_id, organization_id, user_id) [unique]
+    (user_id, status)
+  }
+}
+
+// 4. Boards, lists, access preferences
+
+Table boards {
+  id uuid [pk]
+  organization_id uuid [not null]
+  workspace_id uuid [not null]
+  name varchar(160) [not null]
+  description text
+  visibility resource_visibility [not null, default: 'workspace']
+  created_by uuid [ref: > users.id]
+  background json [not null]
+  settings json [not null]
+  is_archived boolean [not null, default: false]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+  deleted_at timestamp
+
+  indexes {
+    (id, workspace_id) [unique]
+    (id, organization_id) [unique]
+    (workspace_id, created_at)
+  }
+}
+
+Table board_memberships {
+  board_id uuid [not null]
+  workspace_id uuid [not null]
+  user_id uuid [not null]
+  role board_role [not null, default: 'editor']
+  added_by uuid [ref: > users.id]
+  created_at timestamp [not null]
+
+  indexes {
+    (board_id, user_id) [pk]
+    (board_id, workspace_id, user_id) [unique]
+    (user_id, board_id)
+  }
+}
+
+Table board_preferences {
+  board_id uuid [not null, ref: > boards.id]
+  user_id uuid [not null, ref: > users.id]
+  is_starred boolean [not null, default: false]
+  is_watched boolean [not null, default: false]
+  last_viewed_at timestamp
+
+  indexes {
+    (board_id, user_id) [pk]
+  }
+}
+
+Table lists {
+  id uuid [pk]
+  board_id uuid [not null, ref: > boards.id]
+  name varchar(160) [not null]
+  position decimal(30,12) [not null]
+  is_archived boolean [not null, default: false]
+  wip_limit int
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+  deleted_at timestamp
+
+  indexes {
+    (id, board_id) [unique]
+    (board_id, position)
+  }
+}
+
+// 5. Cards, assignments, labels, dependencies
+
+Table cards {
+  id uuid [pk]
+  board_id uuid [not null]
+  list_id uuid [not null]
+  title varchar(500) [not null]
+  description text
+  position decimal(30,12) [not null]
+  priority card_priority [not null, default: 'none']
+  start_at timestamp
+  due_at timestamp
+  is_completed boolean [not null, default: false]
+  completed_at timestamp
+  is_archived boolean [not null, default: false]
+  created_by uuid [ref: > users.id]
+  cover_attachment_id uuid
+  metadata json [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+  deleted_at timestamp
+
+  indexes {
+    (id, board_id) [unique]
+    (list_id, position)
+    (board_id, due_at)
+  }
+}
+
+Table card_assignees {
+  card_id uuid [not null]
+  board_id uuid [not null]
+  user_id uuid [not null]
+  assigned_by uuid [ref: > users.id]
+  assigned_at timestamp [not null]
+
+  indexes {
+    (card_id, user_id) [pk]
+    (user_id, card_id)
+  }
+}
+
+Table labels {
+  id uuid [pk]
+  board_id uuid [not null, ref: > boards.id]
+  name varchar(100) [not null]
+  color varchar(24) [not null, default: 'gray']
+  created_at timestamp [not null]
+
+  indexes {
+    (id, board_id) [unique]
+    (board_id, name) [unique]
+  }
+}
+
+Table card_labels {
+  card_id uuid [not null]
+  board_id uuid [not null]
+  label_id uuid [not null]
+
+  indexes {
+    (card_id, label_id) [pk]
+    (label_id, card_id)
+  }
+}
+
+Table card_dependencies {
+  card_id uuid [not null, ref: > cards.id]
+  depends_on_card_id uuid [not null, ref: > cards.id]
+  dependency_type varchar(24) [not null, default: 'blocks']
+  created_by uuid [ref: > users.id]
+  created_at timestamp [not null]
+
+  indexes {
+    (card_id, depends_on_card_id) [pk]
+    (depends_on_card_id, card_id)
+  }
+}
+
+// 6. Checklists
+
+Table checklists {
+  id uuid [pk]
+  card_id uuid [not null, ref: > cards.id]
+  title varchar(180) [not null]
+  position decimal(30,12) [not null]
+  created_at timestamp [not null]
+
+  indexes {
+    (id, card_id) [unique]
+  }
+}
+
+Table checklist_items {
+  id uuid [pk]
+  checklist_id uuid [not null, ref: > checklists.id]
+  title varchar(500) [not null]
+  position decimal(30,12) [not null]
+  is_completed boolean [not null, default: false]
+  completed_at timestamp
+  completed_by uuid [ref: > users.id]
+  assigned_to_user_id uuid [ref: > users.id]
+  due_at timestamp
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (checklist_id, position, id)
+  }
+}
+
+// 7. Collaboration
+
+Table comments {
+  id uuid [pk]
+  card_id uuid [not null, ref: > cards.id]
+  user_id uuid [ref: > users.id]
+  body text [not null]
+  edited_at timestamp
+  deleted_at timestamp
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (card_id, created_at)
+  }
+}
+
+Table card_watchers {
+  card_id uuid [not null, ref: > cards.id]
+  user_id uuid [not null, ref: > users.id]
+  created_at timestamp [not null]
+
+  indexes {
+    (card_id, user_id) [pk]
+  }
+}
+
+Table comment_mentions {
+  comment_id uuid [not null, ref: > comments.id]
+  mentioned_user_id uuid [not null, ref: > users.id]
+
+  indexes {
+    (comment_id, mentioned_user_id) [pk]
+  }
+}
+
+// 8. Attachments
+
+Table attachments {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.id]
+  uploaded_by uuid [ref: > users.id]
+  storage_key text [not null, unique]
+  original_filename text [not null]
+  mime_type varchar(160)
+  size_bytes bigint [not null]
+  checksum_sha256 char(64)
+  created_at timestamp [not null]
+  deleted_at timestamp
+}
+
+Table attachment_links {
+  id uuid [pk]
+  attachment_id uuid [not null, ref: > attachments.id]
+  card_id uuid [ref: > cards.id]
+  comment_id uuid [ref: > comments.id]
+  created_at timestamp [not null]
+
+  indexes {
+    (attachment_id, card_id) [unique]
+    (attachment_id, comment_id) [unique]
+  }
+}
+
+// 9. Custom fields
+
+Table custom_field_definitions {
+  id uuid [pk]
+  board_id uuid [not null, ref: > boards.id]
+  name varchar(120) [not null]
+  field_type varchar(24) [not null]
+  options json [not null]
+  is_required boolean [not null, default: false]
+  position decimal(30,12) [not null]
+  created_at timestamp [not null]
+
+  indexes {
+    (id, board_id) [unique]
+    (board_id, name) [unique]
+  }
+}
+
+Table card_custom_field_values {
+  card_id uuid [not null]
+  board_id uuid [not null]
+  field_id uuid [not null]
+  value json [not null]
+  updated_by uuid [ref: > users.id]
+  updated_at timestamp [not null]
+
+  indexes {
+    (card_id, field_id) [pk]
+  }
+}
+
+// 10. Activity and audit trail
+
+Table activity_events {
+  id bigint [pk, increment]
+  organization_id uuid [not null, ref: > organizations.id]
+  workspace_id uuid [ref: > workspaces.id]
+  board_id uuid [ref: > boards.id]
+  card_id uuid [ref: > cards.id]
+  actor_user_id uuid [ref: > users.id]
+  event_type varchar(100) [not null]
+  payload json [not null]
+  request_id uuid
+  created_at timestamp [not null]
+
+  indexes {
+    (organization_id, created_at)
+    (card_id, created_at)
+  }
+}
+
+Table audit_logs {
+  id bigint [pk, increment]
+  organization_id uuid [not null, ref: > organizations.id]
+  actor_user_id uuid [ref: > users.id]
+  action varchar(120) [not null]
+  resource_type varchar(80) [not null]
+  resource_id uuid
+  before_data json
+  after_data json
+  ip_address varchar(45)
+  user_agent text
+  correlation_id uuid
+  created_at timestamp [not null]
+
+  indexes {
+    (organization_id, created_at)
+  }
+}
+
+// 11. Notifications and delivery
+
+Table notification_preferences {
+  user_id uuid [not null, ref: > users.id]
+  event_type varchar(100) [not null]
+  in_app boolean [not null, default: true]
+  email boolean [not null, default: true]
+  push boolean [not null, default: false]
+
+  indexes {
+    (user_id, event_type) [pk]
+  }
+}
+
+Table notifications {
+  id uuid [pk]
+  user_id uuid [not null, ref: > users.id]
+  organization_id uuid [ref: > organizations.id]
+  event_type varchar(100) [not null]
+  title varchar(240) [not null]
+  body text
+  resource_type varchar(40)
+  resource_id uuid
+  payload json [not null]
+  read_at timestamp
+  created_at timestamp [not null]
+
+  indexes {
+    (user_id, created_at)
+  }
+}
+
+Table notification_deliveries {
+  id uuid [pk]
+  notification_id uuid [not null, ref: > notifications.id]
+  channel varchar(16) [not null]
+  status delivery_status [not null, default: 'pending']
+  attempts int [not null, default: 0]
+  next_attempt_at timestamp
+  delivered_at timestamp
+  last_error text
+  provider_message_id text
+  created_at timestamp [not null]
+
+  indexes {
+    (notification_id, channel) [unique]
+    (status, next_attempt_at)
+  }
+}
+
+// 12. Automation
+
+Table automation_rules {
+  id uuid [pk]
+  board_id uuid [not null, ref: > boards.id]
+  name varchar(160) [not null]
+  description text
+  status automation_status [not null, default: 'active']
+  trigger_definition json [not null]
+  condition_definition json [not null]
+  action_definition json [not null]
+  created_by uuid [ref: > users.id]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+}
+
+Table automation_executions {
+  id uuid [pk]
+  rule_id uuid [not null, ref: > automation_rules.id]
+  trigger_event_id bigint [ref: > activity_events.id]
+  status delivery_status [not null, default: 'pending']
+  input_payload json [not null]
+  output_payload json
+  error_message text
+  started_at timestamp
+  finished_at timestamp
+  created_at timestamp [not null]
+
+  indexes {
+    (status, created_at)
+  }
+}
+
+// 13. Transactional Outbox — Django transaction + Celery publisher
+
+Table outbox_events {
+  id uuid [pk]
+  event_type varchar(150) [not null]
+  aggregate_type varchar(100) [not null]
+  aggregate_id uuid [not null]
+  payload json [not null]
+  status varchar(20) [not null, default: 'pending']
+  occurred_at timestamp [not null]
+  available_at timestamp [not null]
+  attempts int [not null, default: 0]
+  locked_at timestamp
+  locked_by varchar(255)
+  published_at timestamp
+  last_error text
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (status, available_at, occurred_at)
+    (status, locked_at)
+    (aggregate_type, aggregate_id, occurred_at)
+    (published_at)
+  }
+}
+
+// 14. Templates, saved views, recurring cards
+
+Table board_templates {
+  id uuid [pk]
+  organization_id uuid [ref: > organizations.id]
+  name varchar(160) [not null]
+  description text
+  definition json [not null]
+  created_by uuid [ref: > users.id]
+  is_public boolean [not null, default: false]
+  created_at timestamp [not null]
+}
+
+Table saved_views {
+  id uuid [pk]
+  workspace_id uuid [not null, ref: > workspaces.id]
+  user_id uuid [not null, ref: > users.id]
+  name varchar(120) [not null]
+  view_type varchar(24) [not null]
+  filters json [not null]
+  sort_definition json [not null]
+  is_shared boolean [not null, default: false]
+  created_at timestamp [not null]
+
+  indexes {
+    (workspace_id, user_id, name) [unique]
+  }
+}
+
+Table recurring_card_rules {
+  id uuid [pk]
+  board_id uuid [not null, ref: > boards.id]
+  list_id uuid [not null]
+  template_card json [not null]
+  recurrence_rule varchar(200) [not null]
+  timezone varchar(64) [not null, default: 'UTC']
+  next_run_at timestamp [not null]
+  is_active boolean [not null, default: true]
+  created_by uuid [ref: > users.id]
+
+  indexes {
+    (next_run_at, is_active)
+  }
+}
+
+// 15. API, integrations, webhooks
+
+Table api_keys {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.id]
+  created_by uuid [ref: > users.id]
+  name varchar(120) [not null]
+  key_prefix varchar(16) [not null]
+  secret_hash text [not null, unique]
+  scopes text [not null]
+  last_used_at timestamp
+  expires_at timestamp
+  revoked_at timestamp
+  created_at timestamp [not null]
+}
+
+Table integrations {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.id]
+  provider varchar(80) [not null]
+  external_account_id varchar(255)
+  config_ciphertext text
+  connected_by uuid [ref: > users.id]
+  connected_at timestamp [not null]
+  revoked_at timestamp
+
+  indexes {
+    (organization_id, provider, external_account_id) [unique]
+  }
+}
+
+Table webhooks {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.id]
+  endpoint_url text [not null]
+  secret_hash text [not null]
+  event_types text [not null]
+  is_active boolean [not null, default: true]
+  created_by uuid [ref: > users.id]
+  created_at timestamp [not null]
+}
+
+Table webhook_deliveries {
+  id uuid [pk]
+  webhook_id uuid [not null, ref: > webhooks.id]
+  event_id bigint [ref: > activity_events.id]
+  status delivery_status [not null, default: 'pending']
+  attempt_count int [not null, default: 0]
+  response_code int
+  response_body text
+  next_attempt_at timestamp
+  delivered_at timestamp
+  created_at timestamp [not null]
+
+  indexes {
+    (status, next_attempt_at)
+  }
+}
+
+// 16. Plans and billing
+
+Table plans {
+  id uuid [pk]
+  code varchar(60) [not null, unique]
+  name varchar(120) [not null]
+  description text
+  amount_minor bigint [not null]
+  currency char(3) [not null]
+  billing_interval varchar(12) [not null]
+  limits json [not null]
+  features json [not null]
+  is_active boolean [not null, default: true]
+  created_at timestamp [not null]
+}
+
+Table organization_billing_accounts {
+  organization_id uuid [pk, ref: > organizations.id]
+  provider varchar(40) [not null]
+  provider_customer_id varchar(255) [not null]
+  billing_email varchar
+  tax_id text
+  address json [not null]
+  created_at timestamp [not null]
+
+  indexes {
+    (provider, provider_customer_id) [unique]
+  }
+}
+
+Table subscriptions {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.id]
+  plan_id uuid [not null, ref: > plans.id]
+  provider_subscription_id varchar(255)
+  status subscription_status [not null]
+  quantity int [not null, default: 1]
+  current_period_start timestamp
+  current_period_end timestamp
+  trial_ends_at timestamp
+  cancel_at_period_end boolean [not null, default: false]
+  cancelled_at timestamp
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+}
+
+Table invoices {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.id]
+  subscription_id uuid [ref: > subscriptions.id]
+  provider_invoice_id varchar(255) [unique]
+  invoice_number varchar(80)
+  status varchar(24) [not null]
+  currency char(3) [not null]
+  subtotal_minor bigint [not null]
+  tax_minor bigint [not null, default: 0]
+  total_minor bigint [not null]
+  due_at timestamp
+  paid_at timestamp
+  hosted_invoice_url text
+  created_at timestamp [not null]
+}
+
+Table payments {
+  id uuid [pk]
+  invoice_id uuid [not null, ref: > invoices.id]
+  provider_payment_id varchar(255) [unique]
+  amount_minor bigint [not null]
+  currency char(3) [not null]
+  status varchar(24) [not null]
+  processed_at timestamp
+  failure_code varchar(80)
+  created_at timestamp [not null]
+}
+
+// Relationships with composite keys, shown explicitly where DBML supports them.
+
+Ref: workspace_memberships.(workspace_id, organization_id) > workspaces.(id, organization_id)
+Ref: workspace_memberships.(organization_id, user_id) > organization_memberships.(organization_id, user_id)
+Ref: invitations.(workspace_id, organization_id) > workspaces.(id, organization_id)
+Ref: boards.(workspace_id, organization_id) > workspaces.(id, organization_id)
+Ref: board_memberships.(board_id, workspace_id) > boards.(id, workspace_id)
+Ref: board_memberships.(workspace_id, user_id) > workspace_memberships.(workspace_id, user_id)
+Ref: cards.(list_id, board_id) > lists.(id, board_id)
+Ref: card_assignees.(card_id, board_id) > cards.(id, board_id)
+Ref: card_assignees.(board_id, user_id) > board_memberships.(board_id, user_id)
+Ref: card_labels.(card_id, board_id) > cards.(id, board_id)
+Ref: card_labels.(label_id, board_id) > labels.(id, board_id)
+Ref: card_custom_field_values.(card_id, board_id) > cards.(id, board_id)
+Ref: card_custom_field_values.(field_id, board_id) > custom_field_definitions.(id, board_id)
+Ref: recurring_card_rules.(list_id, board_id) > lists.(id, board_id)

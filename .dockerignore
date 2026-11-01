@@ -1,0 +1,104 @@
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# =========================
+# Django
+# =========================
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# =========================
+# Testing & Coverage
+# =========================
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.hypothesis/
+
+# =========================
+# Environment & Secrets
+# =========================
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# =========================
+# UV
+# =========================
+.uv/
+
+# =========================
+# Celery
+# =========================
+celerybeat-schedule
+celerybeat.pid
+
+# =========================
+# IDE & Editors
+# =========================
+.idea/
+.vscode/
+.spyderproject
+.spyproject
+.ropeproject
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Git
+# =========================
+.git/
+.gitignore
+
+# =========================
+# Documentation & Misc
+# =========================
+docs/_build/
+.ipynb_checkpoints/
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+.pyright/
+.ruff_cache/
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
