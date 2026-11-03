@@ -7,6 +7,8 @@ from .base import *
 
 DEBUG = True
 
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "web", '0.0.0.0']
+
 # Django Debug Toolbar
 INSTALLED_APPS += [
     'drf_spectacular',
