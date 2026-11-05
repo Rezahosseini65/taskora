@@ -21,6 +21,9 @@ urlpatterns = [
         SpectacularSwaggerView.as_view(url_name="api-schema"),
         name="swagger-ui",
     ),
+
+    #User App
+    path("api/users/", include("apps.users.urls")),
 ]
 
 # Django Debug Toolbar (Development only)
