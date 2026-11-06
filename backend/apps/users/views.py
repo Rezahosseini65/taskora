@@ -14,8 +14,14 @@ from common.utils.services import (
 )
 
 from .models import User
-from .serializers import UserRegisterSerializer
-from .throttles import UserRegisterThrottle
+from .serializers import (
+    UserRegisterSerializer,
+    UserLoginSerializer,
+)
+from .throttles import (
+    UserRegisterThrottle,
+    UserLoginThrottle,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -87,3 +93,45 @@ class UserRegisterView(APIView):
         TokenCookieManager.set_refresh_cookie(response, refresh_token)
 
         return response
+
+
+class UserLoginView(APIView):
+    throttle_classes = [UserLoginThrottle]
+    authentication_classes = []
+
+    @extend_schema(
+            request=UserLoginSerializer,
+            responses={
+                200: OpenApiResponse(
+                    description="Login successful"
+                ),
+            },
+        )
+
+    def post(self, request):
+        serializer = UserLoginSerializer(
+            data=request.data,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+
+        user = serializer.validated_data["user"]
+
+        try:
+            access_token, refresh_token = generate_access_refresh_tokens(
+                user=user
+            )
+
+            response = Response(
+                {"detail": "Login successful"},
+                status=status.HTTP_200_OK,
+            )
+
+            TokenCookieManager.set_access_cookie(response, access_token)
+            TokenCookieManager.set_refresh_cookie(response, refresh_token)
+
+            return response
+
+        except Exception:
+            logger.exception("Unexpected error during user login.")
+            raise

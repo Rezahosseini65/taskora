@@ -14,3 +14,17 @@ class UserRegisterThrottle(SimpleRateThrottle):
             "scope": self.scope,
             "ident": ident,
         }
+
+
+class UserLoginThrottle(SimpleRateThrottle):
+    scope = 'user_login_throttle'
+
+    def get_cache_key(self, request, view):
+        """
+        Throttle login requests based on client IP address.
+        """
+        ident = self.get_ident(request)
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": ident,
+        }
