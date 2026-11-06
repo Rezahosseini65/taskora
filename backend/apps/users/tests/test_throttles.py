@@ -7,7 +7,10 @@ from django.core.cache import cache
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.users.throttles import UserRegisterThrottle
+from apps.users.throttles import (
+    UserRegisterThrottle,
+    UserLoginThrottle,
+)
 
 
 TEST_SETTINGS = {
@@ -93,4 +96,80 @@ class UserRegisterThrottleTests(APITestCase):
         self.assertEqual(
             response2.status_code,
             status.HTTP_201_CREATED,
+        )
+
+
+@patch.object(
+    UserLoginThrottle,
+    "THROTTLE_RATES",
+    {"user_login_throttle": "2/minute"},
+)
+class UserLoginThrottleTests(APITestCase):
+
+    def setUp(self):
+
+        cache.clear()
+
+        self.url = reverse("users:user-login")
+        self.credentials = {
+            "email": "user@example.com",
+            "password": "WrongPassword123",
+        }
+
+    def test_login_requests_are_throttled_per_ip(self):
+        self.client.defaults["REMOTE_ADDR"] = "192.168.1.10"
+
+        for _ in range(2):
+            response = self.client.post(
+                self.url,
+                self.credentials,
+                format="json",
+            )
+            self.assertEqual(
+                response.status_code,
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        response = self.client.post(
+            self.url,
+            self.credentials,
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+    def test_different_ips_have_independent_throttle_limits(self):
+        self.client.defaults["REMOTE_ADDR"] = "192.168.1.10"
+
+        for _ in range(2):
+            self.client.post(
+                self.url,
+                self.credentials,
+                format="json",
+            )
+
+        response = self.client.post(
+            self.url,
+            self.credentials,
+            format="json",
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+        self.client.defaults["REMOTE_ADDR"] = "192.168.1.11"
+
+        response = self.client.post(
+            self.url,
+            self.credentials,
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
         )

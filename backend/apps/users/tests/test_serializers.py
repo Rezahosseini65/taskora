@@ -2,7 +2,10 @@
 from django.test import TestCase
 
 from apps.users.models import User
-from apps.users.serializers import UserRegisterSerializer
+from apps.users.serializers import (
+    UserRegisterSerializer,
+    UserLoginSerializer,
+)
 
 
 class UserRegisterSerializerTests(TestCase):
@@ -94,3 +97,121 @@ class UserRegisterSerializerTests(TestCase):
 
         self.assertFalse(serializer.is_valid())
         self.assertIn("password", serializer.errors)
+
+
+class UserLoginSerializerTests(TestCase):
+
+    def setUp(self):
+        self.password = "StrongPassword123"
+
+        self.user = User.objects.create_user(
+            email="user@example.com",
+            password=self.password,
+            status=User.AccountStatus.ACTIVE,
+        )
+
+    def test_valid_login(self):
+        serializer = UserLoginSerializer(
+            data={
+                "email": "user@example.com",
+                "password": self.password,
+            }
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["user"], self.user)
+
+    def test_login_with_uppercase_email(self):
+        serializer = UserLoginSerializer(
+            data={
+                "email": "USER@EXAMPLE.COM",
+                "password": self.password,
+            }
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["user"], self.user)
+
+    def test_login_with_incorrect_password(self):
+        serializer = UserLoginSerializer(
+            data={
+                "email": "user@example.com",
+                "password": "WrongPassword123",
+            }
+        )
+
+        self.assertFalse(serializer.is_valid())
+
+    def test_login_with_nonexistent_email(self):
+        serializer = UserLoginSerializer(
+            data={
+                "email": "unknown@example.com",
+                "password": self.password,
+            }
+        )
+
+        self.assertFalse(serializer.is_valid())
+
+    def test_login_with_pending_verification_account(self):
+        self.user.status = User.AccountStatus.PENDING_VERIFICATION
+        self.user.save(update_fields=["status"])
+
+        serializer = UserLoginSerializer(
+            data={
+                "email": "user@example.com",
+                "password": self.password,
+            }
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_login_with_suspended_account(self):
+        self.user.status = User.AccountStatus.SUSPENDED
+        self.user.save(update_fields=["status"])
+
+        serializer = UserLoginSerializer(
+            data={
+                "email": "user@example.com",
+                "password": self.password,
+            }
+        )
+
+        self.assertFalse(serializer.is_valid())
+
+    def test_login_with_deactivated_account(self):
+        self.user.status = User.AccountStatus.DEACTIVATED
+        self.user.save(update_fields=["status"])
+
+        serializer = UserLoginSerializer(
+            data={
+                "email": "user@example.com",
+                "password": self.password,
+            }
+        )
+
+        self.assertFalse(serializer.is_valid())
+
+    def test_login_with_inactive_user(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+
+        serializer = UserLoginSerializer(
+            data={
+                "email": "user@example.com",
+                "password": self.password,
+            }
+        )
+
+        self.assertFalse(serializer.is_valid())
+
+    def test_login_with_soft_deleted_user(self):
+        self.user.soft_delete()
+
+        serializer = UserLoginSerializer(
+            data={
+                "email": "user@example.com",
+                "password": self.password,
+            }
+        )
+
+        self.assertFalse(serializer.is_valid())

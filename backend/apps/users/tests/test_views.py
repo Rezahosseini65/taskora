@@ -122,3 +122,135 @@ class UserRegisterViewTests(APITestCase):
             User.objects.filter(email="newuser@example.com").exists()
         )
         mocked_token_generation.assert_called_once()
+
+
+class UserLoginViewTests(APITestCase):
+
+    def setUp(self):
+        self.url = reverse("users:user-login")
+        self.password = "StrongPassword123"
+
+        self.user = User.objects.create_user(
+            email="user@example.com",
+            password=self.password,
+            status=User.AccountStatus.ACTIVE,
+        )
+
+    def test_successful_login(self):
+        response = self.client.post(
+            self.url,
+            {
+                "email": "user@example.com",
+                "password": self.password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["detail"],
+            "Login successful",
+        )
+
+        self.assertNotIn("access", response.data)
+        self.assertNotIn("refresh", response.data)
+
+        self.assertIn("access_token", response.cookies)
+        self.assertIn("refresh_token", response.cookies)
+
+        self.assertTrue(
+            response.cookies["access_token"]["httponly"]
+        )
+        self.assertTrue(
+            response.cookies["refresh_token"]["httponly"]
+        )
+
+    def test_login_with_incorrect_password(self):
+        response = self.client.post(
+            self.url,
+            {
+                "email": "user@example.com",
+                "password": "WrongPassword123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertNotIn("access_token", response.cookies)
+        self.assertNotIn("refresh_token", response.cookies)
+
+    def test_login_with_suspended_account(self):
+        self.user.status = User.AccountStatus.SUSPENDED
+        self.user.save(update_fields=["status"])
+
+        response = self.client.post(
+            self.url,
+            {
+                "email": "user@example.com",
+                "password": self.password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertNotIn("access_token", response.cookies)
+
+    def test_login_with_deactivated_account(self):
+        self.user.status = User.AccountStatus.DEACTIVATED
+        self.user.save(update_fields=["status"])
+
+        response = self.client.post(
+            self.url,
+            {
+                "email": "user@example.com",
+                "password": self.password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertNotIn("access_token", response.cookies)
+
+    def test_login_with_inactive_user(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+
+        response = self.client.post(
+            self.url,
+            {
+                "email": "user@example.com",
+                "password": self.password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertNotIn("access_token", response.cookies)
+
+    def test_login_with_nonexistent_email(self):
+        response = self.client.post(
+            self.url,
+            {
+                "email": "unknown@example.com",
+                "password": self.password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertNotIn("access_token", response.cookies)
