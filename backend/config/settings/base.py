@@ -31,7 +31,8 @@ ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=[])
 # =========================
 
 LOCAL_APPS = [
-    'apps.users'
+    "common.apps.CommonConfig",
+    'apps.users',
 ]
 
 THIRD_PARTY_APPS = [
@@ -205,7 +206,7 @@ SIMPLE_JWT = {
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication'
+        'common.authentication.jwt.CookieJWTAuthentication',
     ],
     'DEFAULT_THROTTLE_RATES': {
         'user_register_throttle':'10/minute',
