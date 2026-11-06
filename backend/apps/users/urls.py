@@ -14,5 +14,10 @@ urlpatterns = [
         "auth/login/",
         views.UserLoginView.as_view(),
         name="user-login"
-    )
+    ),
+    path(
+        "auth/csrf/",
+        views.CSRFTokenView.as_view(),
+        name="csrf-token"
+    ),
 ]

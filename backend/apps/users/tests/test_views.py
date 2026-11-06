@@ -254,3 +254,18 @@ class UserLoginViewTests(APITestCase):
             status.HTTP_400_BAD_REQUEST,
         )
         self.assertNotIn("access_token", response.cookies)
+
+
+class CSRFTokenViewTests(APITestCase):
+
+    def test_csrf_endpoint_returns_success_and_sets_cookie(self):
+        response = self.client.get(
+            reverse("users:csrf-token")
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            "csrftoken",
+            response.cookies,
+        )
+        self.assertTrue(response.cookies["csrftoken"].value)

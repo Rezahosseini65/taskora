@@ -1,6 +1,7 @@
 import logging
 
 from django.db import IntegrityError, transaction
+from django.middleware.csrf import get_token
 
 from rest_framework import status
 from rest_framework.response import Response
@@ -135,3 +136,16 @@ class UserLoginView(APIView):
         except Exception:
             logger.exception("Unexpected error during user login.")
             raise
+
+
+class CSRFTokenView(APIView):
+    authentication_classes = []
+    permission_classes = []
+    throttle_classes = []
+
+    def get(self, request):
+        get_token(request)
+        return Response(
+            {"detail": "CSRF cookie set successfully."},
+            status=status.HTTP_200_OK,
+        )
