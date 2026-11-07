@@ -2,6 +2,7 @@ from django.conf import settings
 
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
 
 
 def generate_access_refresh_tokens(user):
@@ -75,3 +76,15 @@ class TokenCookieManager:
         )
 
         return response
+
+    @staticmethod
+    def blacklist_refresh_token(refresh_token: str) -> bool:
+        """
+        Blacklist a refresh token to prevent further use.
+        """
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+            return True
+        except TokenError:
+            return False

@@ -2,9 +2,13 @@
 from unittest.mock import patch
 
 from django.urls import reverse
+from django.conf import settings
+from django.middleware.csrf import get_token
 
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APIClient
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.users.models import User
 
@@ -269,3 +273,110 @@ class CSRFTokenViewTests(APITestCase):
             response.cookies,
         )
         self.assertTrue(response.cookies["csrftoken"].value)
+
+
+class UserLogoutViewTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient(enforce_csrf_checks=True)
+        self.url = reverse("users:user-logout")
+
+        self.user = User.objects.create_user(
+            email="logout@example.com",
+            password="StrongPassword123",
+            status=User.AccountStatus.ACTIVE,
+        )
+
+        self.refresh_token = RefreshToken.for_user(self.user)
+        self.access_token = self.refresh_token.access_token
+
+    def authenticate_client(self):
+        self.client.cookies[
+            settings.SIMPLE_JWT["AUTH_COOKIE"]
+        ] = str(self.access_token)
+
+    def set_refresh_cookie(self, token):
+        self.client.cookies[
+            settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]
+        ] = str(token)
+
+    def get_csrf_token(self):
+        response = self.client.get(reverse("users:csrf-token"))
+        return response.cookies[settings.CSRF_COOKIE_NAME].value
+
+    def test_successful_logout_blacklists_refresh_token_and_clears_cookies(self):
+        self.authenticate_client()
+        self.set_refresh_cookie(self.refresh_token)
+        csrf_token = self.get_csrf_token()
+
+        response = self.client.post(
+            self.url,
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            BlacklistedToken.objects.filter(
+                token__jti=self.refresh_token["jti"]
+            ).exists()
+        )
+        self.assertEqual(
+            response.cookies[settings.SIMPLE_JWT["AUTH_COOKIE"]].value,
+            "",
+        )
+        self.assertEqual(
+            response.cookies[settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]].value,
+            "",
+        )
+
+    def test_logout_without_refresh_token_still_succeeds(self):
+        self.authenticate_client()
+        csrf_token = self.get_csrf_token()
+
+        response = self.client.post(
+            self.url,
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.cookies[settings.SIMPLE_JWT["AUTH_COOKIE"]].value,
+            "",
+        )
+        self.assertEqual(
+            response.cookies[settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]].value,
+            "",
+        )
+
+    def test_logout_with_invalid_refresh_token_still_succeeds(self):
+        self.authenticate_client()
+        self.set_refresh_cookie("invalid-refresh-token")
+        csrf_token = self.get_csrf_token()
+
+        response = self.client.post(
+            self.url,
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.cookies[settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]].value,
+            "",
+        )
+
+    def test_logout_without_access_token_is_rejected(self):
+        response = self.client.post(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_logout_without_csrf_token_is_rejected(self):
+        self.authenticate_client()
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )

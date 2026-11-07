@@ -46,23 +46,37 @@
 
 ## 6. Authentication
 - [ ] Review authentication backend
-- [ ] Enforce account status restrictions
-- [ ] Verify email-based authentication
-- [ ] Review password validation
-- [ ] Verify inactive and suspended accounts
+- [x] Enforce account status restrictions
+- [x] Verify email-based authentication
+- [x] Review password validation
+- [x] Verify inactive and suspended accounts
+- [x] Implement cookie-based JWT authentication
+- [x] Implement JWT access and refresh cookies
+- [x] Implement CSRF protection
+- [x] Add CSRF token endpoint
+- [x] Implement registration and login throttling
 
 ## 7. Testing
 - [ ] Add User model tests
 - [ ] Add UserQuerySet tests
 - [ ] Add manager tests
 - [ ] Add soft-delete and restore tests
-- [ ] Add authentication tests
+- [x] Add authentication tests
 - [ ] Add Django Admin tests
+- [x] Add registration and login serializer tests
+- [x] Add registration and login API tests
+- [x] Add throttling tests
+- [x] Add CSRF tests
 
 ## 8. Documentation and Final Review
 - [ ] Document User model decisions
 - [ ] Review code quality and formatting
-- [ ] Run Django system checks
-- [ ] Run automated tests
-- [ ] Review Git changes
+- [x] Run Django system checks
+- [x] Run automated tests
+- [x] Review Git changes for the latest authentication/CSRF commit
+- [x] Commit authentication and CSRF changes
+- [ ] Complete final Users app review
 - [ ] Commit completed Users app changes
+- [ ] Rebase users branch onto develop
+- [ ] Merge users branch into develop
+- [ ] Delete users branch after successful merge

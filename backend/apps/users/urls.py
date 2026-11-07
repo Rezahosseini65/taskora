@@ -20,4 +20,14 @@ urlpatterns = [
         views.CSRFTokenView.as_view(),
         name="csrf-token"
     ),
+    path(
+        "auth/logout/",
+        views.UserLogoutView.as_view(),
+        name="user-logout"
+    ),
+    path(
+        "auth/refresh/",
+        views.RefreshAccessTokenView.as_view(),
+        name="token-refresh",
+    ),
 ]
