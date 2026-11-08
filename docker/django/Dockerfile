@@ -8,9 +8,11 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
-    UV_HTTP_TIMEOUT=30000
+    UV_HTTP_TIMEOUT=300 \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple/ \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
-# Build dependencies
+# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
@@ -18,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pinned uv
+# Install pinned uv version
 COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /uvx /bin/
 
 WORKDIR /app
@@ -26,13 +28,21 @@ WORKDIR /app
 # Copy dependency files
 COPY backend/pyproject.toml backend/uv.lock ./
 
+# Rewrite package URLs in the image copy of uv.lock.
+# The original backend/uv.lock on the host remains unchanged.
+# Package versions and hashes are preserved.
+RUN sed -i \
+    -e 's#https://files.pythonhosted.org/#https://pypi.tuna.tsinghua.edu.cn/#g' \
+    -e 's#https://pypi.org/simple#https://pypi.tuna.tsinghua.edu.cn/simple#g' \
+    uv.lock
+
 
 # =========================
 # 2. Development Builder
 # =========================
 FROM base AS development-builder
 
-# Install production + development dependencies
+# Install production and development dependencies
 RUN uv sync --frozen --no-install-project
 
 
@@ -67,9 +77,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd --gid 1000 appuser && \
     useradd --uid 1000 --gid 1000 --create-home appuser
 
-# Copy virtual environment
+# Copy virtual environment from development builder
 COPY --from=development-builder --chown=appuser:appuser \
-    /app/.venv /opt/venv
+    /opt/venv /opt/venv
 
 # Copy Django project
 COPY --chown=appuser:appuser backend/ /app/
@@ -90,11 +100,11 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
+WORKDIR /app
+
 # Create non-root application user
 RUN groupadd --system appuser && \
     useradd --system --gid appuser --create-home appuser
-
-WORKDIR /app
 
 # Install runtime libraries only
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -105,7 +115,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy production virtual environment
 COPY --from=production-builder --chown=appuser:appuser \
-    /app/.venv /opt/venv
+    /opt/venv /opt/venv
 
 # Copy Django project
 COPY --chown=appuser:appuser backend/ /app/
