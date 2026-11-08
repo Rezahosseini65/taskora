@@ -42,3 +42,4 @@ DEBUG_TOOLBAR_CONFIG = {
 
 # Email Backend
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+DEFAULT_FROM_EMAIL = "noreply@taskora.local"
