@@ -33,6 +33,7 @@ ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=[])
 LOCAL_APPS = [
     "common.apps.CommonConfig",
     'apps.users',
+    'apps.outbox',
 ]
 
 THIRD_PARTY_APPS = [
