@@ -233,6 +233,15 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
+CELERY_BEAT_SCHEDULE = {
+    "process-outbox-events": {
+        "task": "apps.outbox.tasks.process_outbox_events",
+        "schedule": 10.0,
+        "kwargs": {
+            "batch_size": 100,
+        },
+    },
+}
 
 CSRF_COOKIE_NAME = "csrftoken"
 CSRF_HEADER_NAME = "HTTP_X_CSRFTOKEN"
