@@ -30,4 +30,9 @@ urlpatterns = [
         views.RefreshAccessTokenView.as_view(),
         name="token-refresh",
     ),
+    path(
+        "auth/email/verify/",
+        views.EmailVerificationView.as_view(),
+        name="email-verify",
+    ),
 ]

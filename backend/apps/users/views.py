@@ -3,6 +3,7 @@ import logging
 from django.db import IntegrityError, transaction
 from django.middleware.csrf import get_token
 from django.conf import settings
+from django.utils import timezone
 
 from rest_framework import status
 from rest_framework.response import Response
@@ -14,10 +15,13 @@ from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.settings import api_settings
+from rest_framework.exceptions import ValidationError
 
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
 from .models import User
+from apps.outbox.services import create_outbox_event
+from apps.users.services import otp
 from common.authentication.jwt import CookieJWTAuthentication
 from common.utils.services import (
     TokenCookieManager,
@@ -25,11 +29,16 @@ from common.utils.services import (
 )
 from .serializers import (
     UserRegisterSerializer,
+    EmailVerificationSerializer,
     UserLoginSerializer,
 )
 from .throttles import (
     UserRegisterThrottle,
     UserLoginThrottle,
+)
+from apps.users.services.verification import (
+    generate_verification_token,
+    verify_verification_token,
 )
 
 
@@ -38,9 +47,9 @@ logger = logging.getLogger(__name__)
 
 class UserRegisterView(APIView):
     """
-    Handle user registration and issue JWT tokens.
+    Handle user registration and create an email verification event.
 
-    The user creation and token generation process are performed
+    User creation and Outbox event creation are performed
     within a single database transaction.
     """
 
@@ -51,11 +60,10 @@ class UserRegisterView(APIView):
         request=UserRegisterSerializer,
         responses={
             201: OpenApiResponse(
-                description="Registration successful"
+                description="Registration successful. Email verification required."
             ),
         },
     )
-
     def post(self, request):
         serializer = UserRegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -71,9 +79,16 @@ class UserRegisterView(APIView):
                     **validated_data,
                 )
 
-                access_token, refresh_token = (
-                    generate_access_refresh_tokens(user=user)
+                create_outbox_event(
+                    event_type="users.email_verification_requested",
+                    aggregate_type="user",
+                    aggregate_id=user.id,
+                    payload={
+                        "email": user.email,
+                    },
                 )
+
+                verification_token = generate_verification_token(user_id=user.id)
 
         except IntegrityError:
             logger.warning(
@@ -93,15 +108,120 @@ class UserRegisterView(APIView):
             logger.exception("Unexpected error during user registration.")
             raise
 
-        response = Response(
-            {"detail": "Registration successful"},
+        return Response(
+            {
+                "detail": (
+                    "Registration successful. "
+                    "Please verify your email address."
+                ),
+                "verification_token": verification_token,
+            },
             status=status.HTTP_201_CREATED,
+        )
+
+
+class EmailVerificationView(APIView):
+    """
+    Verify a user's email address using a signed verification token
+    and a one-time verification code.
+
+    Upon successful verification, activate the account and issue
+    access and refresh JWT tokens through HttpOnly cookies.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = EmailVerificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        verification_token = serializer.validated_data["verification_token"]
+        verification_code = serializer.validated_data["verification_code"]
+
+        user_id = verify_verification_token(verification_token)
+
+        if user_id is None:
+            raise ValidationError({
+                "verification_token": (
+                    "Invalid or expired verification token."
+                )
+            })
+
+        with transaction.atomic():
+            try:
+                user = User.all_objects.select_for_update().get(
+                    pk=user_id,
+                )
+            except User.DoesNotExist:
+                raise ValidationError({
+                    "verification_token": (
+                        "Invalid or expired verification token."
+                    )
+                })
+
+            if user.deleted_at is not None:
+                raise ValidationError({
+                    "verification_token": (
+                        "Invalid or expired verification token."
+                    )
+                })
+
+            if user.status != User.AccountStatus.PENDING_VERIFICATION:
+                raise ValidationError({
+                    "detail": "This account does not require verification."
+                })
+
+            verification_result = otp.verify_and_consume_verification_code(
+                user_id=user.id,
+                code=verification_code,
+            )
+
+            if verification_result == -1:
+                return Response(
+                    {
+                        "detail": (
+                            "Too many failed attempts. "
+                            "Please try again later."
+                        )
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+
+            if verification_result is not True:
+                raise ValidationError({
+                    "verification_code": (
+                        "Invalid or expired verification code."
+                    )
+                })
+
+            user.status = User.AccountStatus.ACTIVE
+            user.email_verified_at = timezone.now()
+
+            user.save(
+                update_fields=[
+                    "status",
+                    "email_verified_at",
+                    "updated_at",
+                ]
+            )
+
+        access_token, refresh_token = generate_access_refresh_tokens(
+            user=user,
+        )
+
+        response = Response(
+            {
+                "detail": "Email verified successfully."
+            },
+            status=status.HTTP_200_OK,
         )
 
         TokenCookieManager.set_access_cookie(response, access_token)
         TokenCookieManager.set_refresh_cookie(response, refresh_token)
 
         return response
+
 
 
 class UserLoginView(APIView):

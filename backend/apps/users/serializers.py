@@ -62,6 +62,28 @@ class UserRegisterSerializer(serializers.Serializer):
         return data
 
 
+
+class EmailVerificationSerializer(serializers.Serializer):
+    verification_token = serializers.CharField(
+        required=True,
+        trim_whitespace=False,
+    )
+    verification_code = serializers.CharField(
+        required=True,
+        min_length=6,
+        max_length=6,
+        trim_whitespace=False,
+    )
+
+    def validate_verification_code(self, value) -> str:
+        if not value.isdigit():
+            raise serializers.ValidationError(
+                _("Verification code must contain only digits.")
+            )
+
+        return value
+
+
 class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     password = serializers.CharField(
