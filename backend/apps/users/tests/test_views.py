@@ -1078,3 +1078,237 @@ class ResendVerificationEmailViewTests(APITestCase):
             self.assert_generic_response(response)
 
         mocked_create_event.assert_not_called()
+
+
+
+class UserChangePasswordViewTests(APITestCase):
+
+    def setUp(self):
+        self.client = APIClient(enforce_csrf_checks=True)
+        self.url = reverse("users:user-change-password")
+
+        self.current_password = "CurrentStrong!2026"
+        self.new_password = "NewStrongPassword!2026"
+
+        self.user = User.objects.create_user(
+            email="password-change@example.com",
+            password=self.current_password,
+            status=User.AccountStatus.ACTIVE,
+        )
+
+        # First device
+        self.refresh_token = RefreshToken.for_user(self.user)
+        self.access_token = self.refresh_token.access_token
+
+        # Second device
+        self.second_refresh_token = RefreshToken.for_user(self.user)
+
+    def authenticate_client(self):
+        self.client.cookies[
+            settings.SIMPLE_JWT["AUTH_COOKIE"]
+        ] = str(self.access_token)
+
+        self.client.cookies[
+            settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]
+        ] = str(self.refresh_token)
+
+    def get_csrf_token(self):
+        response = self.client.get(
+            reverse("users:csrf-token")
+        )
+        return response.cookies[settings.CSRF_COOKIE_NAME].value
+
+    def get_valid_data(self):
+        return {
+            "current_password": self.current_password,
+            "new_password": self.new_password,
+            "confirm_new_password": self.new_password,
+        }
+
+    def assert_auth_cookies_deleted(self, response):
+        access_cookie = settings.SIMPLE_JWT["AUTH_COOKIE"]
+        refresh_cookie = settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]
+
+        self.assertEqual(response.cookies[access_cookie].value, "")
+        self.assertEqual(response.cookies[refresh_cookie].value, "")
+
+    def test_successful_password_change(self):
+        self.authenticate_client()
+        csrf_token = self.get_csrf_token()
+
+        response = self.client.post(
+            self.url,
+            self.get_valid_data(),
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.user.refresh_from_db()
+
+        self.assertTrue(self.user.check_password(self.new_password))
+        self.assertFalse(self.user.check_password(self.current_password))
+
+        self.assert_auth_cookies_deleted(response)
+
+    def test_successful_password_change_blacklists_all_refresh_tokens(self):
+        self.authenticate_client()
+        csrf_token = self.get_csrf_token()
+
+        response = self.client.post(
+            self.url,
+            self.get_valid_data(),
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        for refresh_token in (
+            self.refresh_token,
+            self.second_refresh_token,
+        ):
+            self.assertTrue(
+                BlacklistedToken.objects.filter(
+                    token__jti=refresh_token["jti"]
+                ).exists()
+            )
+
+    def test_password_change_with_incorrect_current_password(self):
+        self.authenticate_client()
+        csrf_token = self.get_csrf_token()
+
+        data = {
+            **self.get_valid_data(),
+            "current_password": "IncorrectPassword!2026",
+        }
+
+        response = self.client.post(
+            self.url,
+            data,
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("current_password", response.data)
+
+        self.user.refresh_from_db()
+
+        self.assertTrue(self.user.check_password(self.current_password))
+
+        self.assertFalse(
+            BlacklistedToken.objects.filter(
+                token__jti=self.refresh_token["jti"]
+            ).exists()
+        )
+
+    def test_password_change_with_mismatched_confirmation(self):
+        self.authenticate_client()
+        csrf_token = self.get_csrf_token()
+
+        data = {
+            **self.get_valid_data(),
+            "confirm_new_password": "DifferentPassword!2026",
+        }
+
+        response = self.client.post(
+            self.url,
+            data,
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("confirm_new_password", response.data)
+
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.current_password))
+
+    def test_password_change_with_weak_new_password(self):
+        self.authenticate_client()
+        csrf_token = self.get_csrf_token()
+
+        data = {
+            **self.get_valid_data(),
+            "new_password": "weak",
+            "confirm_new_password": "weak",
+        }
+
+        response = self.client.post(
+            self.url,
+            data,
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("new_password", response.data)
+
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.current_password))
+
+    def test_password_change_without_authentication(self):
+        response = self.client.post(
+            self.url,
+            self.get_valid_data(),
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_password_change_without_csrf_token(self):
+        self.authenticate_client()
+
+        response = self.client.post(
+            self.url,
+            self.get_valid_data(),
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.current_password))
+
+    def test_password_change_with_same_password_is_rejected(self):
+        self.authenticate_client()
+        csrf_token = self.get_csrf_token()
+
+        data = {
+            "current_password": self.current_password,
+            "new_password": self.current_password,
+            "confirm_new_password": self.current_password,
+        }
+
+        response = self.client.post(
+            self.url,
+            data,
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("new_password", response.data)
+
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.current_password))

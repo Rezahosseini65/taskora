@@ -153,3 +153,66 @@ class UserLoginSerializer(serializers.Serializer):
 
         attrs["user"] = user
         return attrs
+
+
+
+class UserChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(
+        required=True,
+        trim_whitespace=False,
+        write_only=True,
+        style={"input_type": "password"},
+    )
+    new_password = serializers.CharField(
+        required=True,
+        trim_whitespace=False,
+        write_only=True,
+        validators=[validate_strong_password],
+        style={"input_type": "password"},
+    )
+    confirm_new_password = serializers.CharField(
+        required=True,
+        trim_whitespace=False,
+        write_only=True,
+        style={"input_type": "password"},
+    )
+
+    def validate_current_password(self, value):
+        user = self.context["request"].user
+
+        if not user.check_password(value):
+            raise serializers.ValidationError(
+                _("Your current password is incorrect."),
+                code="incorrect_current_password",
+            )
+
+        return value
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+
+        new_password = attrs["new_password"]
+        confirm_new_password = attrs["confirm_new_password"]
+
+        if new_password != confirm_new_password:
+            raise serializers.ValidationError({
+                "confirm_new_password": _(
+                    "New passwords do not match."
+                )
+            })
+
+        if user.check_password(new_password):
+            raise serializers.ValidationError({
+                "new_password": _(
+                    "New password must be different from your current password."
+                )
+            })
+
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({
+                "new_password": list(exc.messages)
+            })
+
+        return attrs

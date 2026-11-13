@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 
 from django.test import TestCase
 
@@ -5,6 +6,7 @@ from apps.users.models import User
 from apps.users.serializers import (
     UserRegisterSerializer,
     UserLoginSerializer,
+    UserChangePasswordSerializer,
 )
 from apps.users.services.verification import verify_verification_token
 
@@ -241,3 +243,80 @@ class UserLoginSerializerTests(TestCase):
         )
 
         self.assertFalse(serializer.is_valid())
+
+
+class UserChangePasswordSerializerTests(TestCase):
+    def setUp(self):
+        self.current_password = "CurrentStrong!2026"
+        self.user = User.objects.create_user(
+            email="password-change@example.com",
+            password=self.current_password,
+        )
+        self.context = {
+            "request": SimpleNamespace(user=self.user),
+        }
+
+    def get_serializer(self, **data):
+        return UserChangePasswordSerializer(
+            data=data,
+            context=self.context,
+        )
+
+    def test_valid_password_change(self):
+        serializer = self.get_serializer(
+            current_password=self.current_password,
+            new_password="NewStrongPassword!2026",
+            confirm_new_password="NewStrongPassword!2026",
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_invalid_current_password(self):
+        serializer = self.get_serializer(
+            current_password="WrongPassword!2026",
+            new_password="NewStrongPassword!2026",
+            confirm_new_password="NewStrongPassword!2026",
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("current_password", serializer.errors)
+
+    def test_password_confirmation_mismatch(self):
+        serializer = self.get_serializer(
+            current_password=self.current_password,
+            new_password="NewStrongPassword!2026",
+            confirm_new_password="DifferentPassword!2026",
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("confirm_new_password", serializer.errors)
+
+    def test_weak_new_password(self):
+        serializer = self.get_serializer(
+            current_password=self.current_password,
+            new_password="weak",
+            confirm_new_password="weak",
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("new_password", serializer.errors)
+
+    def test_new_password_same_as_current_password(self):
+        serializer = self.get_serializer(
+            current_password=self.current_password,
+            new_password=self.current_password,
+            confirm_new_password=self.current_password,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("new_password", serializer.errors)
+
+    def test_django_password_validators_are_applied(self):
+        serializer = self.get_serializer(
+            current_password=self.current_password,
+            new_password="password123456",
+            confirm_new_password="password123456",
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("new_password", serializer.errors)

@@ -32,6 +32,7 @@ from .serializers import (
     EmailVerificationSerializer,
     ResendVerificationEmailSerializer,
     UserLoginSerializer,
+    UserChangePasswordSerializer,
 )
 from .throttles import (
     UserRegisterThrottle,
@@ -545,3 +546,91 @@ class RefreshAccessTokenView(APIView):
             )
 
         return response
+
+
+
+class UserChangePasswordView(APIView):
+    """
+    Change the authenticated user's password.
+    All existing refresh tokens are revoked after a successful change.
+    """
+
+    authentication_classes = [CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def enforce_csrf(self, request):
+        check = CSRFCheck(lambda request: None)
+        check.process_request(request)
+        reason = check.process_view(request, None, (), {})
+
+        if reason:
+            raise PermissionDenied(f"CSRF Failed: {reason}")
+
+    @extend_schema(
+        request=UserChangePasswordSerializer,
+        responses={
+            200: OpenApiResponse(
+                description="Password changed successfully."
+            ),
+            400: OpenApiResponse(
+                description="Password validation failed."
+            ),
+            401: OpenApiResponse(
+                description="Authentication failed."
+            ),
+            403: OpenApiResponse(
+                description="CSRF validation failed."
+            ),
+        },
+    )
+    def post(self, request):
+        self.enforce_csrf(request)
+
+        user = request.user
+
+        if (
+            user.deleted_at is not None
+            or not user.is_active
+            or user.status != User.AccountStatus.ACTIVE
+        ):
+            response = Response(
+                {"detail": "Your account is not active."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+            TokenCookieManager.delete_tokens_cookies(response)
+            return response
+
+        serializer = UserChangePasswordSerializer(
+            data=request.data,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            with transaction.atomic():
+                user.set_password(
+                    serializer.validated_data["new_password"]
+                )
+                user.save(update_fields=["password"])
+
+                TokenCookieManager.blacklist_user_refresh_tokens(user)
+
+            response = Response(
+                {
+                    "detail": (
+                        "Password changed successfully. "
+                        "Please log in again."
+                    )
+                },
+                status=status.HTTP_200_OK,
+            )
+
+            TokenCookieManager.delete_tokens_cookies(response)
+
+            return response
+
+        except Exception:
+            logger.exception(
+                "Unexpected error while changing user password."
+            )
+            raise

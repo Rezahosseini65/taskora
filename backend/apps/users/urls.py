@@ -40,4 +40,9 @@ urlpatterns = [
         views.ResendVerificationEmailView.as_view(),
         name="email-resend",
     ),
+    path(
+        "auth/password/change/",
+        views.UserChangePasswordView.as_view(),
+        name="user-change-password",
+    ),
 ]
