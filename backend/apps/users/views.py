@@ -44,9 +44,7 @@ from apps.users.services.verification import (
     verify_verification_token,
 )
 
-
 logger = logging.getLogger(__name__)
-
 
 
 def _activate_resend_generation_after_commit(user_id, request_id):
@@ -251,8 +249,6 @@ class EmailVerificationView(APIView):
         TokenCookieManager.set_refresh_cookie(response, refresh_token)
 
         return response
-
-
 
 
 class ResendVerificationEmailView(APIView):

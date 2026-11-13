@@ -6,6 +6,7 @@ from apps.users.serializers import (
     UserRegisterSerializer,
     UserLoginSerializer,
 )
+from apps.users.services.verification import verify_verification_token
 
 
 class UserRegisterSerializerTests(TestCase):
@@ -158,12 +159,37 @@ class UserLoginSerializerTests(TestCase):
 
         serializer = UserLoginSerializer(
             data={
-                "email": "user@example.com",
+                "email": self.user.email,
                 "password": self.password,
-            }
+            },
         )
 
-        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertFalse(serializer.is_valid())
+
+        self.assertEqual(
+            str(serializer.errors["code"][0]),
+            "email_not_verified",
+        )
+
+        self.assertEqual(
+            str(serializer.errors["detail"][0]),
+            "Please verify your email address before logging in.",
+        )
+
+        self.assertEqual(
+            str(serializer.errors["verification_required"][0]),
+            "True",
+        )
+
+        verification_token = serializer.errors["verification_token"][0]
+
+        self.assertIsNotNone(verification_token)
+
+        token_user_id = verify_verification_token(
+            str(verification_token)
+        )
+
+        self.assertEqual(token_user_id, self.user.id)
 
     def test_login_with_suspended_account(self):
         self.user.status = User.AccountStatus.SUSPENDED

@@ -519,21 +519,21 @@ class UserLoginViewTests(APITestCase):
             status=User.AccountStatus.ACTIVE,
         )
 
-    def test_successful_login(self):
-        response = self.client.post(
+    def _login(self, email="user@example.com", password=None):
+        return self.client.post(
             self.url,
             {
-                "email": "user@example.com",
-                "password": self.password,
+                "email": email,
+                "password": password or self.password,
             },
             format="json",
         )
 
+    def test_successful_login(self):
+        response = self._login()
+
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(
-            response.data["detail"],
-            "Login successful",
-        )
+        self.assertEqual(response.data["detail"], "Login successful")
 
         self.assertNotIn("access", response.data)
         self.assertNotIn("refresh", response.data)
@@ -541,27 +541,46 @@ class UserLoginViewTests(APITestCase):
         self.assertIn("access_token", response.cookies)
         self.assertIn("refresh_token", response.cookies)
 
-        self.assertTrue(
-            response.cookies["access_token"]["httponly"]
-        )
-        self.assertTrue(
-            response.cookies["refresh_token"]["httponly"]
-        )
+        self.assertTrue(response.cookies["access_token"]["httponly"])
+        self.assertTrue(response.cookies["refresh_token"]["httponly"])
 
     def test_login_with_incorrect_password(self):
-        response = self.client.post(
-            self.url,
-            {
-                "email": "user@example.com",
-                "password": "WrongPassword123",
-            },
-            format="json",
-        )
+        response = self._login(password="WrongPassword123")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotIn("access_token", response.cookies)
+        self.assertNotIn("refresh_token", response.cookies)
+
+    def test_login_with_pending_verification_account(self):
+        self.user.status = User.AccountStatus.PENDING_VERIFICATION
+        self.user.save(update_fields=["status"])
+
+        response = self._login()
 
         self.assertEqual(
             response.status_code,
             status.HTTP_400_BAD_REQUEST,
         )
+
+        self.assertEqual(
+            str(response.data["code"][0]),
+            "email_not_verified",
+        )
+
+        self.assertTrue(
+            response.data["verification_required"][0]
+        )
+
+        verification_token = response.data["verification_token"][0]
+
+        self.assertIsNotNone(verification_token)
+
+        token_user_id = verify_verification_token(
+            str(verification_token)
+        )
+
+        self.assertEqual(token_user_id, self.user.id)
+
         self.assertNotIn("access_token", response.cookies)
         self.assertNotIn("refresh_token", response.cookies)
 
@@ -569,75 +588,38 @@ class UserLoginViewTests(APITestCase):
         self.user.status = User.AccountStatus.SUSPENDED
         self.user.save(update_fields=["status"])
 
-        response = self.client.post(
-            self.url,
-            {
-                "email": "user@example.com",
-                "password": self.password,
-            },
-            format="json",
-        )
+        response = self._login()
 
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertNotIn("access_token", response.cookies)
+        self.assertNotIn("refresh_token", response.cookies)
 
     def test_login_with_deactivated_account(self):
         self.user.status = User.AccountStatus.DEACTIVATED
         self.user.save(update_fields=["status"])
 
-        response = self.client.post(
-            self.url,
-            {
-                "email": "user@example.com",
-                "password": self.password,
-            },
-            format="json",
-        )
+        response = self._login()
 
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertNotIn("access_token", response.cookies)
+        self.assertNotIn("refresh_token", response.cookies)
 
     def test_login_with_inactive_user(self):
         self.user.is_active = False
         self.user.save(update_fields=["is_active"])
 
-        response = self.client.post(
-            self.url,
-            {
-                "email": "user@example.com",
-                "password": self.password,
-            },
-            format="json",
-        )
+        response = self._login()
 
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertNotIn("access_token", response.cookies)
+        self.assertNotIn("refresh_token", response.cookies)
 
     def test_login_with_nonexistent_email(self):
-        response = self.client.post(
-            self.url,
-            {
-                "email": "unknown@example.com",
-                "password": self.password,
-            },
-            format="json",
-        )
+        response = self._login(email="unknown@example.com")
 
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertNotIn("access_token", response.cookies)
-
+        self.assertNotIn("refresh_token", response.cookies)
 
 class CSRFTokenViewTests(APITestCase):
 

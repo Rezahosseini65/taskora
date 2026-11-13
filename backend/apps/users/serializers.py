@@ -7,7 +7,7 @@ from rest_framework import serializers
 
 from .models import User
 from .validators import validate_strong_password
-
+from apps.users.services.verification import generate_verification_token
 
 class UserRegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
@@ -95,7 +95,7 @@ class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     password = serializers.CharField(
         required=True,
-        style={'input_type':'password'},
+        style={"input_type": "password"},
         write_only=True
     )
 
@@ -114,22 +114,41 @@ class UserLoginSerializer(serializers.Serializer):
 
         if not user:
             raise serializers.ValidationError(
-                _("Your email or password is incorrect, please try again.")
+                _("Your email or password is incorrect, please try again."),
+                code="invalid_credentials",
             )
 
         if user.deleted_at is not None or not user.is_active:
             raise serializers.ValidationError(
-                _("Your email or password is incorrect, please try again.")
+                _("Your email or password is incorrect, please try again."),
+                code="invalid_credentials",
+            )
+
+        if user.status == User.AccountStatus.PENDING_VERIFICATION:
+            verification_token = generate_verification_token(
+                                user_id=user.id
+                            )
+            raise serializers.ValidationError(
+                {
+                    "code": "email_not_verified",
+                    "detail": _(
+                        "Please verify your email address before logging in."
+                    ),
+                    "verification_required": True,
+                    "verification_token":verification_token,
+                }
             )
 
         if user.status == User.AccountStatus.SUSPENDED:
             raise serializers.ValidationError(
-                _("Your account is suspended.")
+                _("Your account is suspended."),
+                code="account_suspended",
             )
 
-        if user.status == User.AccountStatus.DEACTIVATED:
+        if user.status != User.AccountStatus.ACTIVE:
             raise serializers.ValidationError(
-                _("Your email or password is incorrect, please try again.")
+                _("Your email or password is incorrect, please try again."),
+                code="invalid_credentials",
             )
 
         attrs["user"] = user
