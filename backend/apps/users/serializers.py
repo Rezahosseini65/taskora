@@ -84,6 +84,13 @@ class EmailVerificationSerializer(serializers.Serializer):
         return value
 
 
+class ResendVerificationEmailSerializer(serializers.Serializer):
+    verification_token = serializers.CharField(
+        required=True,
+        trim_whitespace=False,
+    )
+
+
 class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     password = serializers.CharField(

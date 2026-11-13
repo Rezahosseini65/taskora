@@ -45,10 +45,8 @@ class CookieJWTAuthentication(JWTAuthentication):
 
         if (
             user.deleted_at is not None
-            or user.status in (
-                user.AccountStatus.SUSPENDED,
-                user.AccountStatus.DEACTIVATED,
-            )
+            or not user.is_active
+            or user.status != user.AccountStatus.ACTIVE
         ):
             raise AuthenticationFailed("Your account is not active.")
 

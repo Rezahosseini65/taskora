@@ -266,6 +266,145 @@ class ClaimPendingEventsTests(TestCase):
         self.assertNotEqual(claimed_event.lock_token, old_token)
         self.assertEqual(claimed_event.attempts, 2)
 
+    def test_does_not_claim_second_event_for_same_aggregate(self):
+        user_id = uuid4()
+
+        processing_event = self.create_event(
+            aggregate_type="user",
+            aggregate_id=user_id,
+            status=OutboxEvent.Status.PROCESSING,
+            attempts=1,
+            locked_at=self.now,
+            lock_token=uuid4(),
+        )
+
+        pending_event = self.create_event(
+            aggregate_type="user",
+            aggregate_id=user_id,
+        )
+
+        claimed_events = claim_pending_events()
+
+        self.assertEqual(claimed_events, [])
+
+        processing_event.refresh_from_db()
+        pending_event.refresh_from_db()
+
+        self.assertEqual(
+            processing_event.status,
+            OutboxEvent.Status.PROCESSING,
+        )
+        self.assertEqual(
+            pending_event.status,
+            OutboxEvent.Status.PENDING,
+        )
+        self.assertEqual(pending_event.attempts, 0)
+
+    def test_claims_events_for_different_aggregates_concurrently(self):
+        first_user_id = uuid4()
+        second_user_id = uuid4()
+
+        self.create_event(
+            aggregate_type="user",
+            aggregate_id=first_user_id,
+            status=OutboxEvent.Status.PROCESSING,
+            attempts=1,
+            locked_at=self.now,
+            lock_token=uuid4(),
+        )
+
+        second_user_event = self.create_event(
+            aggregate_type="user",
+            aggregate_id=second_user_id,
+        )
+
+        claimed_events = claim_pending_events()
+
+        self.assertEqual(len(claimed_events), 1)
+        self.assertEqual(claimed_events[0].id, second_user_event.id)
+
+    def test_claims_only_oldest_event_for_same_aggregate(self):
+        user_id = uuid4()
+
+        first_event = self.create_event(
+            aggregate_type="user",
+            aggregate_id=user_id,
+        )
+
+        second_event = self.create_event(
+            aggregate_type="user",
+            aggregate_id=user_id,
+        )
+
+        claimed_events = claim_pending_events(batch_size=10)
+
+        self.assertEqual(
+            [event.id for event in claimed_events],
+            [first_event.id],
+        )
+
+        second_event.refresh_from_db()
+
+        self.assertEqual(
+            second_event.status,
+            OutboxEvent.Status.PENDING,
+        )
+        self.assertEqual(second_event.attempts, 0)
+
+    def test_does_not_skip_older_pending_event_with_future_availability(self):
+        user_id = uuid4()
+
+        older_event = self.create_event(
+            aggregate_type="user",
+            aggregate_id=user_id,
+            available_at=self.now + timedelta(minutes=5),
+        )
+
+        newer_event = self.create_event(
+            aggregate_type="user",
+            aggregate_id=user_id,
+        )
+
+        claimed_events = claim_pending_events()
+
+        self.assertEqual(claimed_events, [])
+
+        older_event.refresh_from_db()
+        newer_event.refresh_from_db()
+
+        self.assertEqual(
+            older_event.status,
+            OutboxEvent.Status.PENDING,
+        )
+        self.assertEqual(
+            newer_event.status,
+            OutboxEvent.Status.PENDING,
+        )
+
+    def test_claims_events_for_different_aggregates(self):
+        first_user_id = uuid4()
+        second_user_id = uuid4()
+
+        first_event = self.create_event(
+            aggregate_type="user",
+            aggregate_id=first_user_id,
+        )
+
+        second_event = self.create_event(
+            aggregate_type="user",
+            aggregate_id=second_user_id,
+        )
+
+        claimed_events = claim_pending_events(batch_size=10)
+
+        claimed_ids = {event.id for event in claimed_events}
+
+        self.assertEqual(
+            claimed_ids,
+            {first_event.id, second_event.id},
+        )
+
+
 class MarkEventAsProcessedTests(TestCase):
 
     def create_processing_event(self, **kwargs):

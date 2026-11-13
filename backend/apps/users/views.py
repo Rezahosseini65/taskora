@@ -21,7 +21,7 @@ from drf_spectacular.utils import extend_schema, OpenApiResponse
 
 from .models import User
 from apps.outbox.services import create_outbox_event
-from apps.users.services import otp
+from apps.users.services import otp, block
 from common.authentication.jwt import CookieJWTAuthentication
 from common.utils.services import (
     TokenCookieManager,
@@ -30,11 +30,14 @@ from common.utils.services import (
 from .serializers import (
     UserRegisterSerializer,
     EmailVerificationSerializer,
+    ResendVerificationEmailSerializer,
     UserLoginSerializer,
 )
 from .throttles import (
     UserRegisterThrottle,
     UserLoginThrottle,
+    EmailVerificationThrottle,
+    EmailVerificationResendThrottle,
 )
 from apps.users.services.verification import (
     generate_verification_token,
@@ -43,6 +46,27 @@ from apps.users.services.verification import (
 
 
 logger = logging.getLogger(__name__)
+
+
+
+def _activate_resend_generation_after_commit(user_id, request_id):
+    """
+    Activate the generation after the Outbox event has been committed.
+
+    Failures are logged but not raised because the database transaction
+    has already committed. The Outbox handler will retry activation.
+    """
+    try:
+        block.activate_resend_generation(
+            user_id=user_id,
+            request_id=request_id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to activate email verification generation "
+            "after commit for user %s.",
+            user_id,
+        )
 
 
 class UserRegisterView(APIView):
@@ -79,16 +103,21 @@ class UserRegisterView(APIView):
                     **validated_data,
                 )
 
+                generation = block.initialize_generation(user.id)
+
                 create_outbox_event(
                     event_type="users.email_verification_requested",
                     aggregate_type="user",
                     aggregate_id=user.id,
                     payload={
                         "email": user.email,
+                        "generation": generation,
                     },
                 )
 
-                verification_token = generate_verification_token(user_id=user.id)
+                verification_token = generate_verification_token(
+                    user_id=user.id
+                )
 
         except IntegrityError:
             logger.warning(
@@ -131,6 +160,7 @@ class EmailVerificationView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [EmailVerificationThrottle]
 
     def post(self, request):
         serializer = EmailVerificationSerializer(data=request.data)
@@ -222,6 +252,99 @@ class EmailVerificationView(APIView):
 
         return response
 
+
+
+
+class ResendVerificationEmailView(APIView):
+    """
+    Resend an email verification code to an eligible account.
+
+    A generic response is returned regardless of account eligibility
+    to prevent account enumeration.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [EmailVerificationResendThrottle]
+
+    def post(self, request):
+        serializer = ResendVerificationEmailSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        verification_token = serializer.validated_data["verification_token"]
+        user_id = verify_verification_token(verification_token)
+
+        generic_response = Response(
+            {
+                "detail": (
+                    "If the account is eligible, "
+                    "a verification email will be sent."
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+        if user_id is None:
+            return generic_response
+
+        request_id = None
+
+        try:
+            with transaction.atomic():
+                try:
+                    user = (
+                        User.all_objects
+                        .select_for_update()
+                        .get(pk=user_id)
+                    )
+                except User.DoesNotExist:
+                    return generic_response
+
+                if (
+                    user.deleted_at is not None
+                    or user.status != User.AccountStatus.PENDING_VERIFICATION
+                ):
+                    return generic_response
+
+                request_id = block.start_resend_cooldown(user.id)
+
+                if request_id is None:
+                    return generic_response
+
+                create_outbox_event(
+                    event_type="users.email_verification_requested",
+                    aggregate_type="user",
+                    aggregate_id=user.id,
+                    payload={
+                        "email": user.email,
+                        "request_id": request_id,
+                    },
+                )
+
+                transaction.on_commit(
+                    lambda uid=user.id, rid=request_id: (
+                        _activate_resend_generation_after_commit(uid, rid)
+                    )
+                )
+
+        except Exception:
+            if request_id is not None:
+                try:
+                    block.clear_resend_cooldown(
+                        user_id,
+                        request_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to clear email verification resend cooldown."
+                    )
+
+            logger.exception(
+                "Failed to create email verification resend event."
+            )
+            raise
+
+        return generic_response
 
 
 class UserLoginView(APIView):

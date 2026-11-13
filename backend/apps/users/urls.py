@@ -8,7 +8,7 @@ urlpatterns = [
     path(
         "auth/register/",
         views.UserRegisterView.as_view(),
-        name='user-register'
+        name="user-register"
     ),
     path(
         "auth/login/",
@@ -34,5 +34,10 @@ urlpatterns = [
         "auth/email/verify/",
         views.EmailVerificationView.as_view(),
         name="email-verify",
+    ),
+    path(
+        "auth/email/resend/",
+        views.ResendVerificationEmailView.as_view(),
+        name="email-resend",
     ),
 ]

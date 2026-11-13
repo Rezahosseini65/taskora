@@ -4,7 +4,7 @@ from typing import Any
 from uuid import UUID
 
 from django.db import transaction
-from django.db.models import F, Q
+from django.db.models import Exists, F, OuterRef, Q
 from django.utils import timezone
 
 from .models import OutboxEvent
@@ -33,18 +33,21 @@ def create_outbox_event(
     )
 
 
+
 def claim_pending_events(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     lock_timeout: timedelta = OUTBOX_LOCK_TIMEOUT,
 ) -> list[OutboxEvent]:
     """
-    Recover stale events and atomically claim pending events.
+    Recover stale events and atomically claim eligible pending events.
 
-    Events are claimed using SELECT FOR UPDATE SKIP LOCKED
-    to prevent concurrent workers from processing the same event.
-    Each claim receives a unique lock token to prevent stale
-    workers from modifying events claimed by another worker.
+    Events belonging to the same aggregate are processed sequentially.
+    Different aggregates can be processed concurrently.
+
+    SELECT FOR UPDATE SKIP LOCKED prevents concurrent workers from
+    claiming the same event. Lock tokens prevent stale workers from
+    modifying events claimed by another worker.
     """
 
     if batch_size < 1:
@@ -65,10 +68,10 @@ def claim_pending_events(
             )
             .filter(
                 status=OutboxEvent.Status.PROCESSING,
-            )   
+            )
             .filter(
                 Q(locked_at__isnull=True)
-    |           Q(locked_at__lt=lock_expiration)
+                | Q(locked_at__lt=lock_expiration)
             )
         )
 
@@ -100,7 +103,30 @@ def claim_pending_events(
                 ],
             )
 
-        # Claim eligible pending events.
+        # Find aggregates that already have an event being processed.
+        processing_for_aggregate = OutboxEvent.objects.filter(
+            aggregate_type=OuterRef("aggregate_type"),
+            aggregate_id=OuterRef("aggregate_id"),
+            status=OutboxEvent.Status.PROCESSING,
+        )
+
+        # Find older pending events belonging to the same aggregate.
+        older_pending_for_aggregate = (
+            OutboxEvent.objects.filter(
+                aggregate_type=OuterRef("aggregate_type"),
+                aggregate_id=OuterRef("aggregate_id"),
+                status=OutboxEvent.Status.PENDING,
+            )
+            .filter(
+                Q(created_at__lt=OuterRef("created_at"))
+                | Q(
+                    created_at=OuterRef("created_at"),
+                    id__lt=OuterRef("id"),
+                )
+            )
+        )
+
+        # Claim only the oldest eligible event of each aggregate.
         events = list(
             OutboxEvent.objects.select_for_update(
                 skip_locked=True,
@@ -110,7 +136,19 @@ def claim_pending_events(
                 available_at__lte=now,
                 attempts__lt=F("max_attempts"),
             )
-            .order_by("created_at")[:batch_size]
+            .annotate(
+                aggregate_is_processing=Exists(
+                    processing_for_aggregate,
+                ),
+                has_older_pending=Exists(
+                    older_pending_for_aggregate,
+                ),
+            )
+            .filter(
+                aggregate_is_processing=False,
+                has_older_pending=False,
+            )
+            .order_by("created_at", "id")[:batch_size]
         )
 
         for event in events:
@@ -133,7 +171,6 @@ def claim_pending_events(
             )
 
         return events
-
 
 def mark_event_as_processed(
     event_id: UUID,

@@ -1,6 +1,7 @@
 from uuid import uuid4
 from unittest.mock import patch
 
+from django.test import override_settings
 from django.urls import reverse
 from django.conf import settings
 from django.middleware.csrf import get_token
@@ -13,7 +14,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.users.models import User
 from apps.outbox.models import OutboxEvent
 from apps.users.services.verification import verify_verification_token
-
+from apps.users.services import block
 
 class UserRegisterViewTests(APITestCase):
 
@@ -69,7 +70,16 @@ class UserRegisterViewTests(APITestCase):
 
         self.assertEqual(
             event.payload,
-            {"email": user.email},
+            {
+                "email": user.email,
+                "generation": 1,
+            },
+        )
+        self.assertEqual(
+            block._get_redis_client().get(
+                block._get_generation_key(user.id)
+            ),
+            b"1",
         )
         self.assertEqual(event.status, OutboxEvent.Status.PENDING)
 
@@ -749,3 +759,340 @@ class UserLogoutViewTests(APITestCase):
             response.status_code,
             status.HTTP_403_FORBIDDEN,
         )
+
+
+class ResendVerificationEmailViewTests(APITestCase):
+
+    def setUp(self):
+        self.url = reverse("users:email-resend")
+
+        self.user = User.objects.create_user(
+            email="newuser@example.com",
+            password="StrongPassword123",
+        )
+
+        self.valid_data = {
+            "verification_token": "valid-verification-token",
+        }
+
+        self.generation = 2
+
+        self.generic_response_data = {
+            "detail": (
+                "If the account is eligible, "
+                "a verification email will be sent."
+            )
+        }
+
+        self.throttle_patcher = patch(
+            "apps.users.throttles.EmailVerificationResendThrottle.allow_request",
+            return_value=True,
+        )
+        self.throttle_patcher.start()
+        self.addCleanup(self.throttle_patcher.stop)
+
+    def assert_generic_response(self, response):
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, self.generic_response_data)
+
+    @patch("apps.users.views.create_outbox_event")
+    @patch("apps.users.views.block.start_resend_cooldown")
+    @patch("apps.users.views.verify_verification_token")
+    def test_successful_resend_request(
+        self,
+        mocked_verify_token,
+        mocked_start_cooldown,
+        mocked_create_event,
+    ):
+        request_id = "test-resend-request-123"
+
+        mocked_verify_token.return_value = self.user.id
+        mocked_start_cooldown.return_value = request_id
+
+        response = self.client.post(
+            self.url,
+            self.valid_data,
+            format="json",
+        )
+
+        self.assert_generic_response(response)
+
+        mocked_verify_token.assert_called_once_with(
+            self.valid_data["verification_token"]
+        )
+
+        mocked_start_cooldown.assert_called_once_with(self.user.id)
+
+        mocked_create_event.assert_called_once_with(
+            event_type="users.email_verification_requested",
+            aggregate_type="user",
+            aggregate_id=self.user.id,
+            payload={
+                "email": self.user.email,
+                "request_id": request_id,
+            },
+        )
+
+    @patch("apps.users.views.verify_verification_token", return_value=None)
+    @patch("apps.users.views.create_outbox_event")
+    @patch("apps.users.views.block.start_resend_cooldown")
+    def test_resend_with_invalid_verification_token(
+        self,
+        mocked_start_cooldown,
+        mocked_create_event,
+        mocked_verify_token,
+    ):
+        response = self.client.post(
+            self.url,
+            self.valid_data,
+            format="json",
+        )
+
+        self.assert_generic_response(response)
+
+        mocked_start_cooldown.assert_not_called()
+        mocked_create_event.assert_not_called()
+
+    @patch("apps.users.views.verify_verification_token")
+    @patch("apps.users.views.create_outbox_event")
+    @patch("apps.users.views.block.start_resend_cooldown")
+    def test_resend_with_nonexistent_user(
+        self,
+        mocked_start_cooldown,
+        mocked_create_event,
+        mocked_verify_token,
+    ):
+        mocked_verify_token.return_value = uuid4()
+
+        response = self.client.post(
+            self.url,
+            self.valid_data,
+            format="json",
+        )
+
+        self.assert_generic_response(response)
+
+        mocked_start_cooldown.assert_not_called()
+        mocked_create_event.assert_not_called()
+
+    @patch("apps.users.views.verify_verification_token")
+    @patch("apps.users.views.create_outbox_event")
+    @patch("apps.users.views.block.start_resend_cooldown")
+    def test_resend_for_deleted_user(
+        self,
+        mocked_start_cooldown,
+        mocked_create_event,
+        mocked_verify_token,
+    ):
+        self.user.soft_delete()
+        mocked_verify_token.return_value = self.user.id
+
+        response = self.client.post(
+            self.url,
+            self.valid_data,
+            format="json",
+        )
+
+        self.assert_generic_response(response)
+
+        mocked_start_cooldown.assert_not_called()
+        mocked_create_event.assert_not_called()
+
+    @patch("apps.users.views.verify_verification_token")
+    @patch("apps.users.views.create_outbox_event")
+    @patch("apps.users.views.block.start_resend_cooldown")
+    def test_resend_for_already_active_user(
+        self,
+        mocked_start_cooldown,
+        mocked_create_event,
+        mocked_verify_token,
+    ):
+        self.user.status = User.AccountStatus.ACTIVE
+        self.user.save(update_fields=["status"])
+
+        mocked_verify_token.return_value = self.user.id
+
+        response = self.client.post(
+            self.url,
+            self.valid_data,
+            format="json",
+        )
+
+        self.assert_generic_response(response)
+
+        mocked_start_cooldown.assert_not_called()
+        mocked_create_event.assert_not_called()
+
+    @patch("apps.users.views.verify_verification_token")
+    @patch("apps.users.views.create_outbox_event")
+    @patch(
+        "apps.users.views.block.start_resend_cooldown",
+        return_value=None,
+    )
+    def test_resend_during_cooldown(
+        self,
+        mocked_start_cooldown,
+        mocked_create_event,
+        mocked_verify_token,
+    ):
+        mocked_verify_token.return_value = self.user.id
+
+        response = self.client.post(
+            self.url,
+            self.valid_data,
+            format="json",
+        )
+
+        self.assert_generic_response(response)
+
+        mocked_start_cooldown.assert_called_once_with(self.user.id)
+        mocked_create_event.assert_not_called()
+
+    @patch("apps.users.views.verify_verification_token")
+    @patch("apps.users.views.create_outbox_event")
+    @patch(
+        "apps.users.views.block.start_resend_cooldown",
+        return_value=None,
+    )
+    def test_resend_for_temporarily_locked_account(
+        self,
+        mocked_start_cooldown,
+        mocked_create_event,
+        mocked_verify_token,
+    ):
+        mocked_verify_token.return_value = self.user.id
+
+        response = self.client.post(
+            self.url,
+            self.valid_data,
+            format="json",
+        )
+
+        self.assert_generic_response(response)
+
+        mocked_start_cooldown.assert_called_once_with(self.user.id)
+        mocked_create_event.assert_not_called()
+
+    @patch("apps.users.views.block.clear_resend_cooldown")
+    @patch(
+        "apps.users.views.create_outbox_event",
+        side_effect=RuntimeError("Outbox event creation failed"),
+    )
+    @patch("apps.users.views.block.start_resend_cooldown")
+    @patch("apps.users.views.verify_verification_token")
+    def test_cooldown_is_cleared_if_outbox_creation_fails(
+        self,
+        mocked_verify_token,
+        mocked_start_cooldown,
+        mocked_create_event,
+        mocked_clear_cooldown,
+    ):
+        request_id = "test-resend-request-123"
+
+        mocked_verify_token.return_value = self.user.id
+        mocked_start_cooldown.return_value = request_id
+
+        with self.assertRaises(RuntimeError):
+            self.client.post(
+                self.url,
+                self.valid_data,
+                format="json",
+            )
+
+        mocked_start_cooldown.assert_called_once_with(self.user.id)
+        mocked_create_event.assert_called_once()
+
+        mocked_clear_cooldown.assert_called_once_with(
+            self.user.id,
+            request_id,
+        )
+
+    @patch("apps.users.views.verify_verification_token")
+    @patch("apps.users.views.block.start_resend_cooldown")
+    @patch("apps.users.views.create_outbox_event")
+    def test_resend_without_verification_token(
+        self,
+        mocked_create_event,
+        mocked_start_cooldown,
+        mocked_verify_token,
+    ):
+        response = self.client.post(
+            self.url,
+            {},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assertIn("verification_token", response.data)
+
+        mocked_verify_token.assert_not_called()
+        mocked_start_cooldown.assert_not_called()
+        mocked_create_event.assert_not_called()
+
+    @patch("apps.users.views.verify_verification_token")
+    @patch("apps.users.views.block.start_resend_cooldown")
+    @patch("apps.users.views.create_outbox_event")
+    def test_resend_with_missing_token_does_not_create_event(
+        self,
+        mocked_create_event,
+        mocked_start_cooldown,
+        mocked_verify_token,
+    ):
+        response = self.client.post(
+            self.url,
+            {"unexpected_field": "value"},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        mocked_verify_token.assert_not_called()
+        mocked_start_cooldown.assert_not_called()
+        mocked_create_event.assert_not_called()
+
+    @patch("apps.users.views.verify_verification_token")
+    @patch("apps.users.views.block.start_resend_cooldown")
+    @patch("apps.users.views.create_outbox_event")
+    def test_resend_returns_same_response_for_ineligible_accounts(
+        self,
+        mocked_create_event,
+        mocked_start_cooldown,
+        mocked_verify_token,
+    ):
+        mocked_verify_token.return_value = self.user.id
+
+        responses = []
+
+        # Pending account with cooldown active.
+        mocked_start_cooldown.return_value = None
+        responses.append(
+            self.client.post(
+                self.url,
+                self.valid_data,
+                format="json",
+            )
+        )
+
+        # Already active account.
+        self.user.status = User.AccountStatus.ACTIVE
+        self.user.save(update_fields=["status"])
+
+        responses.append(
+            self.client.post(
+                self.url,
+                self.valid_data,
+                format="json",
+            )
+        )
+
+        for response in responses:
+            self.assert_generic_response(response)
+
+        mocked_create_event.assert_not_called()

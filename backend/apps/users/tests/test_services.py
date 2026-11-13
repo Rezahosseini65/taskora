@@ -5,19 +5,26 @@ from django.test import TestCase
 from apps.users.services import block, otp
 
 
+
 class OTPServiceTests(TestCase):
     def setUp(self):
         self.user_id = uuid.uuid4()
         self.redis = otp._get_redis_client()
+
         self.otp_key = otp._get_otp_key(self.user_id)
         self.attempts_key = block._get_attempts_key(self.user_id)
         self.lock_key = block._get_lock_key(self.user_id)
+        self.generation_key = block._get_generation_key(self.user_id)
+
+        self.generation = 1
+        self.redis.set(self.generation_key, self.generation)
 
     def tearDown(self):
         self.redis.delete(
             self.otp_key,
             self.attempts_key,
             self.lock_key,
+            self.generation_key,
         )
 
     def test_generate_verification_code_returns_six_digits(self):
@@ -29,19 +36,29 @@ class OTPServiceTests(TestCase):
     def test_store_verification_code_stores_hmac_digest(self):
         code = "123456"
 
-        otp.store_verification_code(self.user_id, code)
+        result = otp.store_verification_code(
+            self.user_id,
+            code,
+            self.generation,
+        )
 
         stored_value = self.redis.get(self.otp_key)
+        stored_generation, stored_digest = stored_value.decode().split("|")
 
-        self.assertIsNotNone(stored_value)
-        self.assertNotEqual(stored_value.decode(), code)
+        self.assertTrue(result)
+        self.assertEqual(stored_generation, str(self.generation))
+        self.assertNotEqual(stored_digest, code)
         self.assertEqual(
-            stored_value.decode(),
-            otp._get_otp_digest(self.user_id, code),
+            stored_digest,
+            otp._get_otp_digest(self.user_id, code, self.generation),
         )
 
     def test_store_verification_code_sets_expiration(self):
-        otp.store_verification_code(self.user_id, "123456")
+        otp.store_verification_code(
+            self.user_id,
+            "123456",
+            self.generation,
+        )
 
         ttl = self.redis.ttl(self.otp_key)
 
@@ -50,7 +67,12 @@ class OTPServiceTests(TestCase):
 
     def test_correct_code_is_verified_and_consumed(self):
         code = "123456"
-        otp.store_verification_code(self.user_id, code)
+
+        otp.store_verification_code(
+            self.user_id,
+            code,
+            self.generation,
+        )
 
         result = otp.verify_and_consume_verification_code(
             self.user_id,
@@ -62,7 +84,12 @@ class OTPServiceTests(TestCase):
 
     def test_consumed_code_cannot_be_reused(self):
         code = "123456"
-        otp.store_verification_code(self.user_id, code)
+
+        otp.store_verification_code(
+            self.user_id,
+            code,
+            self.generation,
+        )
 
         first_result = otp.verify_and_consume_verification_code(
             self.user_id,
@@ -77,7 +104,11 @@ class OTPServiceTests(TestCase):
         self.assertEqual(second_result, 0)
 
     def test_incorrect_code_does_not_consume_valid_code(self):
-        otp.store_verification_code(self.user_id, "123456")
+        otp.store_verification_code(
+            self.user_id,
+            "123456",
+            self.generation,
+        )
 
         result = otp.verify_and_consume_verification_code(
             self.user_id,
@@ -88,7 +119,11 @@ class OTPServiceTests(TestCase):
         self.assertIsNotNone(self.redis.get(self.otp_key))
 
     def test_incorrect_code_increments_attempt_counter(self):
-        otp.store_verification_code(self.user_id, "123456")
+        otp.store_verification_code(
+            self.user_id,
+            "123456",
+            self.generation,
+        )
 
         result = otp.verify_and_consume_verification_code(
             self.user_id,
@@ -96,10 +131,7 @@ class OTPServiceTests(TestCase):
         )
 
         self.assertEqual(result, 0)
-        self.assertEqual(
-            int(self.redis.get(self.attempts_key)),
-            1,
-        )
+        self.assertEqual(int(self.redis.get(self.attempts_key)), 1)
 
     def test_missing_code_does_not_increment_attempt_counter(self):
         result = otp.verify_and_consume_verification_code(
@@ -112,7 +144,12 @@ class OTPServiceTests(TestCase):
 
     def test_expired_code_cannot_be_verified(self):
         code = "123456"
-        otp.store_verification_code(self.user_id, code)
+
+        otp.store_verification_code(
+            self.user_id,
+            code,
+            self.generation,
+        )
 
         self.redis.delete(self.otp_key)
 
@@ -128,8 +165,16 @@ class OTPServiceTests(TestCase):
         old_code = "123456"
         new_code = "654321"
 
-        otp.store_verification_code(self.user_id, old_code)
-        otp.store_verification_code(self.user_id, new_code)
+        otp.store_verification_code(
+            self.user_id,
+            old_code,
+            self.generation,
+        )
+        otp.store_verification_code(
+            self.user_id,
+            new_code,
+            self.generation,
+        )
 
         old_result = otp.verify_and_consume_verification_code(
             self.user_id,
@@ -143,8 +188,70 @@ class OTPServiceTests(TestCase):
         self.assertEqual(old_result, 0)
         self.assertIs(new_result, True)
 
+    def test_old_generation_cannot_store_verification_code(self):
+        self.redis.set(self.generation_key, 2)
+
+        result = otp.store_verification_code(
+            self.user_id,
+            "123456",
+            self.generation,
+        )
+
+        self.assertFalse(result)
+        self.assertIsNone(self.redis.get(self.otp_key))
+
+    def test_old_generation_code_is_rejected_after_resend(self):
+        code = "123456"
+
+        otp.store_verification_code(
+            self.user_id,
+            code,
+            self.generation,
+        )
+
+        self.redis.incr(self.generation_key)
+
+        result = otp.verify_and_consume_verification_code(
+            self.user_id,
+            code,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIsNotNone(self.redis.get(self.otp_key))
+
+    def test_old_handler_cannot_overwrite_new_generation_code(self):
+        new_code = "654321"
+
+        self.redis.set(self.generation_key, 2)
+
+        new_result = otp.store_verification_code(
+            self.user_id,
+            new_code,
+            2,
+        )
+
+        old_result = otp.store_verification_code(
+            self.user_id,
+            "123456",
+            1,
+        )
+
+        stored_value = self.redis.get(self.otp_key).decode()
+
+        self.assertTrue(new_result)
+        self.assertFalse(old_result)
+        self.assertTrue(stored_value.startswith("2|"))
+        self.assertEqual(
+            stored_value.split("|")[1],
+            otp._get_otp_digest(self.user_id, new_code, 2),
+        )
+
     def test_fifth_incorrect_attempt_locks_account(self):
-        otp.store_verification_code(self.user_id, "123456")
+        otp.store_verification_code(
+            self.user_id,
+            "123456",
+            self.generation,
+        )
 
         for _ in range(4):
             result = otp.verify_and_consume_verification_code(
@@ -162,7 +269,11 @@ class OTPServiceTests(TestCase):
         self.assertTrue(block.is_account_locked(self.user_id))
 
     def test_locked_account_cannot_verify_correct_code(self):
-        otp.store_verification_code(self.user_id, "123456")
+        otp.store_verification_code(
+            self.user_id,
+            "123456",
+            self.generation,
+        )
 
         for _ in range(block.OTP_MAX_ATTEMPTS):
             otp.verify_and_consume_verification_code(
@@ -179,7 +290,11 @@ class OTPServiceTests(TestCase):
         self.assertIsNotNone(self.redis.get(self.otp_key))
 
     def test_successful_verification_resets_attempts(self):
-        otp.store_verification_code(self.user_id, "123456")
+        otp.store_verification_code(
+            self.user_id,
+            "123456",
+            self.generation,
+        )
 
         otp.verify_and_consume_verification_code(
             self.user_id,
@@ -196,19 +311,29 @@ class OTPServiceTests(TestCase):
         self.assertFalse(self.redis.exists(self.lock_key))
 
     def test_successful_verification_removes_existing_lock(self):
-        otp.store_verification_code(self.user_id, "123456")
+        otp.store_verification_code(
+            self.user_id,
+            "123456",
+            self.generation,
+        )
 
-        self.redis.set(self.lock_key, "1", ex=block.OTP_LOCK_DURATION)
-        self.redis.set(self.attempts_key, "5", ex=block.OTP_LOCK_DURATION)
+        self.redis.set(
+            self.lock_key,
+            "1",
+            ex=block.OTP_LOCK_DURATION,
+        )
+        self.redis.set(
+            self.attempts_key,
+            "5",
+            ex=block.OTP_LOCK_DURATION,
+        )
 
-        # A locked account must not be able to verify.
         locked_result = otp.verify_and_consume_verification_code(
             self.user_id,
             "123456",
         )
         self.assertEqual(locked_result, -1)
 
-        # Simulate expiration of the temporary lock.
         self.redis.delete(self.lock_key, self.attempts_key)
 
         result = otp.verify_and_consume_verification_code(
@@ -219,6 +344,7 @@ class OTPServiceTests(TestCase):
         self.assertIs(result, True)
         self.assertFalse(self.redis.exists(self.lock_key))
         self.assertFalse(self.redis.exists(self.attempts_key))
+
 
 
 class OTPBlockServiceTests(TestCase):

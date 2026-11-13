@@ -212,6 +212,8 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'user_register_throttle':'10/minute',
         'user_login_throttle':'10/minute',
+        "email_verification": "10/minute",
+        'email_verification_resend': '5/minute',
     },
 }
 

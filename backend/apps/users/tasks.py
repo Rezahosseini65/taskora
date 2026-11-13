@@ -4,6 +4,8 @@ from celery import shared_task
 from django.conf import settings
 from django.core.mail import send_mail
 
+from apps.users.services import otp
+
 logger = logging.getLogger(__name__)
 
 
@@ -12,22 +14,45 @@ logger = logging.getLogger(__name__)
     max_retries=3,
     default_retry_delay=30,
 )
-def send_verification_email(self, email: str, verification_code: str):
+def send_verification_email(
+    self,
+    email: str,
+    verification_code: str,
+    user_id: str,
+    generation: int,
+):
     """
     Send an email verification code asynchronously.
+
+    Skip the task if its OTP is no longer current.
     """
 
-    subject = "Verify your Taskora email address"
-
-    message = (
-        "Hello,\n\n"
-        "Thank you for registering with Taskora.\n\n"
-        f"Your email verification code is: {verification_code}\n\n"
-        "This code expires in 10 minutes.\n\n"
-        "If you did not create this account, you can ignore this email."
-    )
-
     try:
+        is_current = otp.is_verification_code_current(
+            user_id=user_id,
+            code=verification_code,
+            generation=generation,
+        )
+
+        if not is_current:
+            logger.info(
+                "Skipping outdated verification email for %s. "
+                "Generation: %s.",
+                email,
+                generation,
+            )
+            return False
+
+        subject = "Verify your Taskora email address"
+
+        message = (
+            "Hello,\n\n"
+            "Thank you for registering with Taskora.\n\n"
+            f"Your email verification code is: {verification_code}\n\n"
+            "This code expires in 2 minutes.\n\n"
+            "If you did not create this account, you can ignore this email."
+        )
+
         send_mail(
             subject=subject,
             message=message,
