@@ -1,0 +1,107 @@
+name: Taskora CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - users
+
+  pull_request:
+    branches:
+      - main
+      - develop
+      - users
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: taskora-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Django Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: taskora
+          POSTGRES_USER: taskora
+          POSTGRES_PASSWORD: taskora-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taskora -d taskora"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.test
+      DJANGO_SECRET_KEY: github-actions-test-secret-key
+      DJANGO_DEBUG: "False"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+
+      POSTGRES_DB: taskora
+      POSTGRES_USER: taskora
+      POSTGRES_PASSWORD: taskora-test-password
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+
+      CELERY_BROKER_URL: redis://127.0.0.1:6379/0
+      CELERY_RESULT_BACKEND: redis://127.0.0.1:6379/1
+
+      TIME_ZONE: Asia/Tehran
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies
+        working-directory: backend
+        run: >
+          uv sync --locked --group dev
+          --default-index https://pypi.org/simple
+
+      - name: Django system check
+        working-directory: backend
+        run: uv run python manage.py check
+
+      - name: Check migrations
+        working-directory: backend
+        run: uv run python manage.py makemigrations --check --dry-run
+
+      - name: Run tests
+        working-directory: backend
+        run: uv run python manage.py test
