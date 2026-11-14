@@ -4,9 +4,10 @@ from unittest.mock import patch, Mock
 from uuid import uuid4
 
 from django.test import SimpleTestCase
+from django.conf import settings
 
 from apps.outbox.tasks import process_outbox_events
-
+from apps.users.tasks import send_password_changed_email
 
 class ProcessOutboxEventsTests(SimpleTestCase):
     def setUp(self):
@@ -218,3 +219,65 @@ class ProcessOutboxEventsTests(SimpleTestCase):
             second_event.id,
             second_event.lock_token,
         )
+
+
+class SendPasswordChangedEmailTests(SimpleTestCase):
+
+    @patch("apps.users.tasks.send_mail")
+    def test_successfully_sends_password_changed_email(
+        self,
+        mock_send_mail,
+    ):
+        email = "user@example.com"
+
+        result = send_password_changed_email.run(
+            email=email,
+        )
+
+        mock_send_mail.assert_called_once()
+
+        kwargs = mock_send_mail.call_args.kwargs
+
+        self.assertEqual(
+            kwargs["subject"],
+            "Your Taskora password has been changed",
+        )
+        self.assertEqual(
+            kwargs["from_email"],
+            settings.DEFAULT_FROM_EMAIL,
+        )
+        self.assertEqual(
+            kwargs["recipient_list"],
+            [email],
+        )
+        self.assertIn(
+            "password has been changed",
+            kwargs["message"],
+        )
+        self.assertFalse(kwargs["fail_silently"])
+
+        self.assertTrue(result)
+
+    @patch(
+        "apps.users.tasks.send_password_changed_email.retry",
+        side_effect=RuntimeError("Retry requested"),
+    )
+    @patch("apps.users.tasks.send_mail")
+    def test_retries_when_email_sending_fails(
+        self,
+        mock_send_mail,
+        mock_retry,
+    ):
+        mock_send_mail.side_effect = RuntimeError(
+            "SMTP connection failed"
+        )
+
+        with self.assertRaisesMessage(
+            RuntimeError,
+            "Retry requested",
+        ):
+            send_password_changed_email.run(
+                email="user@example.com",
+            )
+
+        mock_retry.assert_called_once()

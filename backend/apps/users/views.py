@@ -613,6 +613,15 @@ class UserChangePasswordView(APIView):
                 )
                 user.save(update_fields=["password"])
 
+                create_outbox_event(
+                    event_type="users.password_changed",
+                    aggregate_type="user",
+                    aggregate_id=user.id,
+                    payload={
+                        "email": user.email,
+                    },
+                )
+
                 TokenCookieManager.blacklist_user_refresh_tokens(user)
 
             response = Response(

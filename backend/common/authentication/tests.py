@@ -66,13 +66,12 @@ class CookieJWTAuthenticationTests(TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result[0], self.user)
 
-    def test_pending_verification_user_can_authenticate(self):
+    def test_pending_verification_user_cannot_authenticate(self):
         self.user.status = User.AccountStatus.PENDING_VERIFICATION
         self.user.save(update_fields=["status"])
 
-        result = self.authenticate_with_cookie(self.get_access_token())
-
-        self.assertEqual(result[0], self.user)
+        with self.assertRaises(AuthenticationFailed):
+            self.authenticate_with_cookie(self.get_access_token())
 
     def test_suspended_user_cannot_authenticate(self):
         self.user.status = User.AccountStatus.SUSPENDED

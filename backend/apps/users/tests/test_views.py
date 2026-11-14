@@ -1080,7 +1080,6 @@ class ResendVerificationEmailViewTests(APITestCase):
         mocked_create_event.assert_not_called()
 
 
-
 class UserChangePasswordViewTests(APITestCase):
 
     def setUp(self):
@@ -1151,6 +1150,75 @@ class UserChangePasswordViewTests(APITestCase):
         self.assertFalse(self.user.check_password(self.current_password))
 
         self.assert_auth_cookies_deleted(response)
+
+    @patch("apps.users.views.create_outbox_event")
+    def test_successful_password_change_creates_outbox_event(
+        self,
+        mock_create_event,
+    ):
+        self.authenticate_client()
+        csrf_token = self.get_csrf_token()
+
+        response = self.client.post(
+            self.url,
+            self.get_valid_data(),
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        mock_create_event.assert_called_once_with(
+            event_type="users.password_changed",
+            aggregate_type="user",
+            aggregate_id=self.user.id,
+            payload={
+                "email": self.user.email,
+            },
+        )
+
+    @patch(
+        "apps.users.views.create_outbox_event",
+        side_effect=RuntimeError("Outbox creation failed"),
+    )
+    def test_outbox_failure_rolls_back_password_and_token_revocation(
+        self,
+        mock_create_event,
+    ):
+        self.authenticate_client()
+        csrf_token = self.get_csrf_token()
+
+        with self.assertRaisesMessage(
+            RuntimeError,
+            "Outbox creation failed",
+        ):
+            self.client.post(
+                self.url,
+                self.get_valid_data(),
+                format="json",
+                HTTP_X_CSRFTOKEN=csrf_token,
+            )
+
+        mock_create_event.assert_called_once()
+
+        self.user.refresh_from_db()
+
+        self.assertTrue(
+            self.user.check_password(self.current_password)
+        )
+        self.assertFalse(
+            self.user.check_password(self.new_password)
+        )
+
+        for refresh_token in (
+            self.refresh_token,
+            self.second_refresh_token,
+        ):
+            self.assertFalse(
+                BlacklistedToken.objects.filter(
+                    token__jti=refresh_token["jti"]
+                ).exists()
+            )
 
     def test_successful_password_change_blacklists_all_refresh_tokens(self):
         self.authenticate_client()
