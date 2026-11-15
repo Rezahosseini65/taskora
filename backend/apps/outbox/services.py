@@ -179,16 +179,40 @@ def mark_event_as_processed(
     """
     Mark an event as successfully processed.
 
+    Sensitive password reset payloads are cleared after successful
+    processing to prevent reset tokens from remaining in the database.
+
     Only the worker holding the current lock token
     can mark the event as processed.
     """
 
     now = timezone.now()
 
-    updated = OutboxEvent.objects.filter(
+    events = OutboxEvent.objects.filter(
         id=event_id,
         status=OutboxEvent.Status.PROCESSING,
         lock_token=lock_token,
+    )
+
+    # Clear sensitive payloads after successful processing.
+    sensitive_updated = events.filter(
+        event_type="users.password_reset_requested",
+    ).update(
+        status=OutboxEvent.Status.PROCESSED,
+        processed_at=now,
+        payload={},
+        locked_at=None,
+        lock_token=None,
+        last_error="",
+        updated_at=now,
+    )
+
+    if sensitive_updated:
+        return True
+
+    # Preserve payloads for all other event types.
+    updated = events.exclude(
+        event_type="users.password_reset_requested",
     ).update(
         status=OutboxEvent.Status.PROCESSED,
         processed_at=now,

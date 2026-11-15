@@ -1,6 +1,8 @@
 import logging
 
+from urllib.parse import urlencode
 from celery import shared_task
+
 from django.conf import settings
 from django.core.mail import send_mail
 
@@ -120,6 +122,67 @@ def send_password_changed_email(
     except Exception as exc:
         logger.exception(
             "Failed to send password change notification email to %s",
+            email,
+        )
+
+        raise self.retry(exc=exc)
+
+
+@shared_task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=30,
+)
+def send_password_reset_email(
+    self,
+    email: str,
+    reset_token: str,
+):
+    """
+    Send a password reset link asynchronously.
+    """
+
+    try:
+        query_string = urlencode({"token": reset_token})
+
+        separator = "&" if "?" in settings.PASSWORD_RESET_URL else "?"
+
+        reset_url = (
+            f"{settings.PASSWORD_RESET_URL}"
+            f"{separator}{query_string}"
+        )
+
+        subject = "Reset your Taskora password"
+
+        message = (
+            "Hello,\n\n"
+            "We received a request to reset your Taskora account password.\n\n"
+            f"Use the following link to reset your password:\n\n"
+            f"{reset_url}\n\n"
+            "This link expires in 15 minutes and can only be used once.\n\n"
+            "If you did not request a password reset, "
+            "you can safely ignore this email.\n\n"
+            "Taskora Security Team"
+        )
+
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+
+        logger.info(
+            "Password reset email sent successfully to %s",
+            email,
+        )
+
+        return True
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to send password reset email to %s",
             email,
         )
 

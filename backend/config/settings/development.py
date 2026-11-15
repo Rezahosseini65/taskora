@@ -43,3 +43,7 @@ DEBUG_TOOLBAR_CONFIG = {
 # Email Backend
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 DEFAULT_FROM_EMAIL = "noreply@taskora.local"
+PASSWORD_RESET_URL = env(
+    "PASSWORD_RESET_URL",
+    default="http://localhost:3000/reset-password",
+)

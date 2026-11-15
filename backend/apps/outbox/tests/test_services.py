@@ -416,6 +416,7 @@ class MarkEventAsProcessedTests(TestCase):
             "attempts": 1,
             "locked_at": timezone.now(),
             "lock_token": uuid4(),
+            "payload": {"email": "user@example.com"},
         }
         defaults.update(kwargs)
 
@@ -438,6 +439,54 @@ class MarkEventAsProcessedTests(TestCase):
         self.assertIsNone(event.locked_at)
         self.assertIsNone(event.lock_token)
         self.assertEqual(event.last_error, "")
+        self.assertEqual(
+            event.payload,
+            {"email": "user@example.com"},
+        )
+
+    def test_clears_password_reset_payload_after_processing(self):
+        event = self.create_processing_event(
+            event_type="users.password_reset_requested",
+            payload={
+                "email": "user@example.com",
+                "reset_token": "sensitive-token",
+            },
+        )
+
+        result = mark_event_as_processed(
+            event.id,
+            event.lock_token,
+        )
+
+        self.assertTrue(result)
+
+        event.refresh_from_db()
+
+        self.assertEqual(event.status, OutboxEvent.Status.PROCESSED)
+        self.assertEqual(event.payload, {})
+
+    def test_preserves_other_event_payload_after_processing(self):
+        payload = {
+            "email": "user@example.com",
+            "verification_token": "verification-token",
+        }
+
+        event = self.create_processing_event(
+            event_type="users.email_verification_requested",
+            payload=payload,
+        )
+
+        result = mark_event_as_processed(
+            event.id,
+            event.lock_token,
+        )
+
+        self.assertTrue(result)
+
+        event.refresh_from_db()
+
+        self.assertEqual(event.status, OutboxEvent.Status.PROCESSED)
+        self.assertEqual(event.payload, payload)
 
     def test_does_not_process_pending_event(self):
         event = OutboxEvent.objects.create(
@@ -470,7 +519,8 @@ class MarkEventAsProcessedTests(TestCase):
         event = self.create_processing_event()
         old_token = event.lock_token
 
-        event.lock_token = uuid4()
+        new_token = uuid4()
+        event.lock_token = new_token
         event.save(update_fields=["lock_token"])
 
         result = mark_event_as_processed(
@@ -483,7 +533,7 @@ class MarkEventAsProcessedTests(TestCase):
         event.refresh_from_db()
 
         self.assertEqual(event.status, OutboxEvent.Status.PROCESSING)
-        self.assertEqual(event.lock_token, event.lock_token)
+        self.assertEqual(event.lock_token, new_token)
 
 
 class MarkEventAsFailedTests(TestCase):

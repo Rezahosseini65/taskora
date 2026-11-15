@@ -58,3 +58,27 @@ class EmailVerificationResendThrottle(SimpleRateThrottle):
             "scope": self.scope,
             "ident": ident,
         }
+
+
+class ForgotPasswordThrottle(SimpleRateThrottle):
+    scope = "forgot_password"
+
+    def get_cache_key(self, request, view):
+        ident = self.get_ident(request)
+
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": ident,
+        }
+
+
+class ResetPasswordThrottle(SimpleRateThrottle):
+    scope = "reset_password"
+
+    def get_cache_key(self, request, view):
+        ident = self.get_ident(request)
+
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": ident,
+        }

@@ -13,6 +13,8 @@ from apps.users.throttles import (
     UserLoginThrottle,
     EmailVerificationThrottle,
     EmailVerificationResendThrottle,
+    ForgotPasswordThrottle,
+    ResetPasswordThrottle,
 )
 
 
@@ -273,6 +275,148 @@ class EmailVerificationResendThrottleTests(APITestCase):
             self.data,
             format="json",
             REMOTE_ADDR="192.0.2.31",
+        )
+
+        self.assertEqual(response1.status_code, status.HTTP_200_OK)
+        self.assertEqual(response2.status_code, status.HTTP_200_OK)
+
+
+@patch.object(
+    ForgotPasswordThrottle,
+    "THROTTLE_RATES",
+    {"forgot_password": "2/minute"},
+)
+class ForgotPasswordThrottleTests(APITestCase):
+
+    def setUp(self):
+        cache.clear()
+        self.url = reverse("users:forgot-password")
+        self.data = {
+            "email": "user@example.com",
+        }
+
+    @patch(
+        "apps.users.views.ForgotPasswordView.post",
+        autospec=True,
+        return_value=Response(
+            {"detail": "If the account is eligible, a password reset email will be sent."},
+            status=status.HTTP_200_OK,
+        ),
+    )
+    def test_forgot_password_requests_are_throttled_per_ip(self, mock_post):
+        self.client.defaults["REMOTE_ADDR"] = "192.0.2.40"
+
+        for _ in range(2):
+            response = self.client.post(
+                self.url,
+                self.data,
+                format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        response = self.client.post(
+            self.url,
+            self.data,
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+    @patch(
+        "apps.users.views.ForgotPasswordView.post",
+        autospec=True,
+        return_value=Response(
+            {"detail": "If the account is eligible, a password reset email will be sent."},
+            status=status.HTTP_200_OK,
+        ),
+    )
+    def test_different_ips_have_independent_throttle_limits(self, mock_post):
+        response1 = self.client.post(
+            self.url,
+            self.data,
+            format="json",
+            REMOTE_ADDR="192.0.2.40",
+        )
+        response2 = self.client.post(
+            self.url,
+            self.data,
+            format="json",
+            REMOTE_ADDR="192.0.2.41",
+        )
+
+        self.assertEqual(response1.status_code, status.HTTP_200_OK)
+        self.assertEqual(response2.status_code, status.HTTP_200_OK)
+
+
+@patch.object(
+    ResetPasswordThrottle,
+    "THROTTLE_RATES",
+    {"reset_password": "2/minute"},
+)
+class ResetPasswordThrottleTests(APITestCase):
+
+    def setUp(self):
+        cache.clear()
+        self.url = reverse("users:reset-password")
+        self.data = {
+            "token": "test-token",
+            "new_password": "StrongPassword123!",
+            "confirm_new_password": "StrongPassword123!",
+        }
+
+    @patch(
+        "apps.users.views.ResetPasswordView.post",
+        autospec=True,
+        return_value=Response(
+            {"detail": "Password reset successfully."},
+            status=status.HTTP_200_OK,
+        ),
+    )
+    def test_reset_password_requests_are_throttled_per_ip(self, mock_post):
+        self.client.defaults["REMOTE_ADDR"] = "192.0.2.50"
+
+        for _ in range(2):
+            response = self.client.post(
+                self.url,
+                self.data,
+                format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        response = self.client.post(
+            self.url,
+            self.data,
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+    @patch(
+        "apps.users.views.ResetPasswordView.post",
+        autospec=True,
+        return_value=Response(
+            {"detail": "Password reset successfully."},
+            status=status.HTTP_200_OK,
+        ),
+    )
+    def test_different_ips_have_independent_throttle_limits(self, mock_post):
+        response1 = self.client.post(
+            self.url,
+            self.data,
+            format="json",
+            REMOTE_ADDR="192.0.2.50",
+        )
+        response2 = self.client.post(
+            self.url,
+            self.data,
+            format="json",
+            REMOTE_ADDR="192.0.2.51",
         )
 
         self.assertEqual(response1.status_code, status.HTTP_200_OK)

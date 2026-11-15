@@ -5,6 +5,7 @@ from django.test import override_settings
 from django.urls import reverse
 from django.conf import settings
 from django.middleware.csrf import get_token
+from django.utils import timezone
 
 from rest_framework import status
 from rest_framework.test import APITestCase, APIClient
@@ -15,6 +16,13 @@ from apps.users.models import User
 from apps.outbox.models import OutboxEvent
 from apps.users.services.verification import verify_verification_token
 from apps.users.services import block
+from apps.users.services.password_reset import (
+    generate_password_reset_token,
+    get_password_reset_user_id,
+    _get_password_reset_key,
+    _get_redis_client,
+)
+
 
 class UserRegisterViewTests(APITestCase):
 
@@ -1380,3 +1388,609 @@ class UserChangePasswordViewTests(APITestCase):
 
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password(self.current_password))
+
+
+
+class ForgotPasswordViewTests(APITestCase):
+
+    def setUp(self):
+        self.url = reverse("users:forgot-password")
+
+        self.user = User.objects.create_user(
+            email="password-reset@example.com",
+            password="CurrentStrongPassword!2026",
+            status=User.AccountStatus.ACTIVE,
+        )
+
+        self.generic_response_data = {
+            "detail": (
+                "If the account is eligible, "
+                "a password reset email will be sent."
+            )
+        }
+
+        self.throttle_patcher = patch(
+            "apps.users.throttles.ForgotPasswordThrottle.allow_request",
+            return_value=True,
+        )
+        self.throttle_patcher.start()
+        self.addCleanup(self.throttle_patcher.stop)
+
+        self.addCleanup(
+            _get_redis_client().delete,
+            _get_password_reset_key(self.user.id),
+        )
+
+    def request_password_reset(self, email=None):
+        return self.client.post(
+            self.url,
+            {
+                "email": email or self.user.email,
+            },
+            format="json",
+        )
+
+    def assert_generic_response(self, response):
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, self.generic_response_data)
+
+    def test_successful_password_reset_request(self):
+        response = self.request_password_reset()
+
+        self.assert_generic_response(response)
+
+        event = OutboxEvent.objects.get(
+            event_type="users.password_reset_requested",
+            aggregate_type="user",
+            aggregate_id=self.user.id,
+        )
+
+        self.assertEqual(
+            event.payload["email"],
+            self.user.email,
+        )
+
+        self.assertIn("reset_token", event.payload)
+
+        reset_token = event.payload["reset_token"]
+
+        self.assertEqual(
+            get_password_reset_user_id(reset_token),
+            self.user.id,
+        )
+
+        self.assertEqual(
+            event.status,
+            OutboxEvent.Status.PENDING,
+        )
+
+    def test_unknown_email_returns_same_generic_response(self):
+        response = self.request_password_reset(
+            email="unknown@example.com",
+        )
+
+        self.assert_generic_response(response)
+        self.assertEqual(OutboxEvent.objects.count(), 0)
+
+    def test_invalid_email_is_rejected(self):
+        response = self.client.post(
+            self.url,
+            {"email": "invalid-email"},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("email", response.data)
+
+        self.assertEqual(OutboxEvent.objects.count(), 0)
+
+    def test_missing_email_is_rejected(self):
+        response = self.client.post(
+            self.url,
+            {},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("email", response.data)
+
+        self.assertEqual(OutboxEvent.objects.count(), 0)
+
+    def test_new_request_invalidates_previous_reset_token(self):
+        first_response = self.request_password_reset()
+        self.assert_generic_response(first_response)
+
+        first_event = OutboxEvent.objects.get(
+            event_type="users.password_reset_requested",
+            aggregate_id=self.user.id,
+        )
+        first_token = first_event.payload["reset_token"]
+
+        second_response = self.request_password_reset()
+        self.assert_generic_response(second_response)
+
+        events = OutboxEvent.objects.filter(
+            event_type="users.password_reset_requested",
+            aggregate_id=self.user.id,
+        ).order_by("created_at", "id")
+
+        self.assertEqual(events.count(), 2)
+
+        second_token = events.last().payload["reset_token"]
+
+        self.assertIsNone(
+            get_password_reset_user_id(first_token)
+        )
+
+        self.assertEqual(
+            get_password_reset_user_id(second_token),
+            self.user.id,
+        )
+
+    def test_pending_verification_user_can_request_reset(self):
+        self.user.status = User.AccountStatus.PENDING_VERIFICATION
+        self.user.save(update_fields=["status"])
+
+        response = self.request_password_reset()
+
+        self.assert_generic_response(response)
+
+        self.assertTrue(
+            OutboxEvent.objects.filter(
+                event_type="users.password_reset_requested",
+                aggregate_id=self.user.id,
+            ).exists()
+        )
+
+    def test_suspended_user_cannot_request_reset(self):
+        self.user.status = User.AccountStatus.SUSPENDED
+        self.user.save(update_fields=["status"])
+
+        response = self.request_password_reset()
+
+        self.assert_generic_response(response)
+        self.assertEqual(OutboxEvent.objects.count(), 0)
+
+    def test_deactivated_user_cannot_request_reset(self):
+        self.user.status = User.AccountStatus.DEACTIVATED
+        self.user.save(update_fields=["status"])
+
+        response = self.request_password_reset()
+
+        self.assert_generic_response(response)
+        self.assertEqual(OutboxEvent.objects.count(), 0)
+
+    def test_inactive_user_cannot_request_reset(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+
+        response = self.request_password_reset()
+
+        self.assert_generic_response(response)
+        self.assertEqual(OutboxEvent.objects.count(), 0)
+
+    def test_deleted_user_cannot_request_reset(self):
+        self.user.soft_delete()
+
+        response = self.request_password_reset()
+
+        self.assert_generic_response(response)
+        self.assertEqual(OutboxEvent.objects.count(), 0)
+
+    @patch(
+        "apps.users.views.create_outbox_event",
+        side_effect=RuntimeError("Outbox creation failed"),
+    )
+    def test_outbox_failure_does_not_create_database_event(
+        self,
+        mocked_create_event,
+    ):
+        with self.assertRaisesMessage(
+            RuntimeError,
+            "Outbox creation failed",
+        ):
+            self.request_password_reset()
+
+        mocked_create_event.assert_called_once()
+
+        self.assertEqual(OutboxEvent.objects.count(), 0)
+
+
+
+class ResetPasswordViewTests(APITestCase):
+
+    def setUp(self):
+        self.url = reverse("users:reset-password")
+
+        self.current_password = "CurrentStrongPassword!2026"
+        self.new_password = "BrandNewStrongPassword!2026"
+
+        self.user = User.objects.create_user(
+            email="reset-password@example.com",
+            password=self.current_password,
+            status=User.AccountStatus.ACTIVE,
+        )
+
+        self.email_verified_at = timezone.now()
+        self.user.email_verified_at = self.email_verified_at
+        self.user.save(update_fields=["email_verified_at"])
+
+        self.reset_token = generate_password_reset_token(
+            self.user.id
+        )
+
+        self.refresh_token = RefreshToken.for_user(self.user)
+        self.second_refresh_token = RefreshToken.for_user(self.user)
+
+        self.throttle_patcher = patch(
+            "apps.users.throttles.ResetPasswordThrottle.allow_request",
+            return_value=True,
+        )
+        self.throttle_patcher.start()
+        self.addCleanup(self.throttle_patcher.stop)
+
+        self.addCleanup(
+            _get_redis_client().delete,
+            _get_password_reset_key(self.user.id),
+        )
+
+    def get_valid_data(self):
+        return {
+            "token": self.reset_token,
+            "new_password": self.new_password,
+            "confirm_new_password": self.new_password,
+        }
+
+    def reset_password(self, data=None):
+        return self.client.post(
+            self.url,
+            data or self.get_valid_data(),
+            format="json",
+        )
+
+    def assert_password_unchanged(self):
+        self.user.refresh_from_db()
+
+        self.assertTrue(
+            self.user.check_password(self.current_password)
+        )
+        self.assertFalse(
+            self.user.check_password(self.new_password)
+        )
+
+    def assert_refresh_tokens_blacklisted(self):
+        for refresh_token in (
+            self.refresh_token,
+            self.second_refresh_token,
+        ):
+            self.assertTrue(
+                BlacklistedToken.objects.filter(
+                    token__jti=refresh_token["jti"]
+                ).exists()
+            )
+
+    def test_successful_password_reset(self):
+        response = self.reset_password()
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.assertEqual(
+            response.data["detail"],
+            (
+                "Password reset successfully. "
+                "Please log in with your new password."
+            ),
+        )
+
+        self.user.refresh_from_db()
+
+        self.assertTrue(
+            self.user.check_password(self.new_password)
+        )
+        self.assertFalse(
+            self.user.check_password(self.current_password)
+        )
+
+        self.assertEqual(
+            self.user.status,
+            User.AccountStatus.ACTIVE,
+        )
+
+        self.assertEqual(
+            self.user.email_verified_at,
+            self.email_verified_at,
+        )
+
+        self.assert_refresh_tokens_blacklisted()
+
+        self.assertFalse(
+            get_password_reset_user_id(self.reset_token)
+        )
+
+        self.assertEqual(
+            response.cookies[
+                settings.SIMPLE_JWT["AUTH_COOKIE"]
+            ].value,
+            "",
+        )
+
+        self.assertEqual(
+            response.cookies[
+                settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]
+            ].value,
+            "",
+        )
+
+    def test_successful_reset_creates_password_changed_event(self):
+        response = self.reset_password()
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        event = OutboxEvent.objects.get(
+            event_type="users.password_changed",
+            aggregate_type="user",
+            aggregate_id=self.user.id,
+        )
+
+        self.assertEqual(
+            event.payload,
+            {
+                "email": self.user.email,
+            },
+        )
+
+    def test_pending_verification_user_can_reset_password(self):
+        self.user.status = User.AccountStatus.PENDING_VERIFICATION
+        self.user.email_verified_at = None
+        self.user.save(
+            update_fields=["status", "email_verified_at"]
+        )
+
+        response = self.reset_password()
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.user.refresh_from_db()
+
+        self.assertTrue(
+            self.user.check_password(self.new_password)
+        )
+
+        self.assertEqual(
+            self.user.status,
+            User.AccountStatus.PENDING_VERIFICATION,
+        )
+
+        self.assertIsNone(self.user.email_verified_at)
+
+    def test_invalid_token_is_rejected(self):
+        data = {
+            **self.get_valid_data(),
+            "token": "invalid-token",
+        }
+
+        response = self.reset_password(data)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("token", response.data)
+
+        self.assert_password_unchanged()
+
+    def test_missing_token_is_rejected(self):
+        data = self.get_valid_data()
+        data.pop("token")
+
+        response = self.reset_password(data)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("token", response.data)
+
+        self.assert_password_unchanged()
+
+    def test_expired_token_is_rejected(self):
+        with patch(
+            "apps.users.services.password_reset.signing.loads",
+            side_effect=__import__(
+                "django.core.signing",
+                fromlist=["SignatureExpired"],
+            ).SignatureExpired("Expired"),
+        ):
+            response = self.reset_password()
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("token", response.data)
+
+        self.assert_password_unchanged()
+
+    def test_token_can_only_be_used_once(self):
+        first_response = self.reset_password()
+
+        self.assertEqual(
+            first_response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        second_response = self.reset_password()
+
+        self.assertEqual(
+            second_response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("token", second_response.data)
+
+    def test_password_mismatch_is_rejected(self):
+        data = {
+            **self.get_valid_data(),
+            "confirm_new_password": "DifferentStrongPassword!2026",
+        }
+
+        response = self.reset_password(data)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("confirm_new_password", response.data)
+
+        self.assert_password_unchanged()
+
+        self.assertEqual(
+            get_password_reset_user_id(self.reset_token),
+            self.user.id,
+        )
+
+    def test_weak_password_is_rejected(self):
+        data = {
+            **self.get_valid_data(),
+            "new_password": "weak",
+            "confirm_new_password": "weak",
+        }
+
+        response = self.reset_password(data)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("new_password", response.data)
+
+        self.assert_password_unchanged()
+
+        self.assertEqual(
+            get_password_reset_user_id(self.reset_token),
+            self.user.id,
+        )
+
+    def test_same_password_is_rejected(self):
+        data = {
+            **self.get_valid_data(),
+            "new_password": self.current_password,
+            "confirm_new_password": self.current_password,
+        }
+
+        response = self.reset_password(data)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("new_password", response.data)
+
+        self.assert_password_unchanged()
+
+        self.assertEqual(
+            get_password_reset_user_id(self.reset_token),
+            self.user.id,
+        )
+
+    def test_suspended_user_cannot_reset_password(self):
+        self.user.status = User.AccountStatus.SUSPENDED
+        self.user.save(update_fields=["status"])
+
+        response = self.reset_password()
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assert_password_unchanged()
+
+    def test_deactivated_user_cannot_reset_password(self):
+        self.user.status = User.AccountStatus.DEACTIVATED
+        self.user.save(update_fields=["status"])
+
+        response = self.reset_password()
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assert_password_unchanged()
+
+    def test_inactive_user_cannot_reset_password(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+
+        response = self.reset_password()
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assert_password_unchanged()
+
+    def test_deleted_user_cannot_reset_password(self):
+        self.user.soft_delete()
+
+        response = self.reset_password()
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assert_password_unchanged()
+
+    @patch(
+        "apps.users.views.create_outbox_event",
+        side_effect=RuntimeError("Outbox creation failed"),
+    )
+    def test_outbox_failure_rolls_back_password_change(
+        self,
+        mocked_create_event,
+    ):
+        with self.assertRaisesMessage(
+            RuntimeError,
+            "Outbox creation failed",
+        ):
+            self.reset_password()
+
+        mocked_create_event.assert_called_once()
+
+        self.user.refresh_from_db()
+
+        self.assertTrue(
+            self.user.check_password(self.current_password)
+        )
+
+        self.assertFalse(
+            self.user.check_password(self.new_password)
+        )
+
+        self.assertFalse(
+            BlacklistedToken.objects.filter(
+                token__jti=self.refresh_token["jti"]
+            ).exists()
+        )
+
+        # Redis consumption is not rolled back with the database.
+        self.assertIsNone(
+            get_password_reset_user_id(self.reset_token)
+        )

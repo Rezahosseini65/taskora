@@ -4,6 +4,8 @@ from django.db import IntegrityError, transaction
 from django.middleware.csrf import get_token
 from django.conf import settings
 from django.utils import timezone
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from rest_framework import status
 from rest_framework.response import Response
@@ -33,16 +35,25 @@ from .serializers import (
     ResendVerificationEmailSerializer,
     UserLoginSerializer,
     UserChangePasswordSerializer,
+    ForgotPasswordSerializer,
+    ResetPasswordSerializer,
 )
 from .throttles import (
     UserRegisterThrottle,
     UserLoginThrottle,
     EmailVerificationThrottle,
     EmailVerificationResendThrottle,
+    ForgotPasswordThrottle,
+    ResetPasswordThrottle,
 )
 from apps.users.services.verification import (
     generate_verification_token,
     verify_verification_token,
+)
+from apps.users.services.password_reset import (
+    generate_password_reset_token,
+    get_password_reset_user_id,
+    consume_password_reset_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -643,3 +654,220 @@ class UserChangePasswordView(APIView):
                 "Unexpected error while changing user password."
             )
             raise
+
+
+class ForgotPasswordView(APIView):
+    """
+    Request a password reset link.
+
+    A generic response is returned regardless of account eligibility
+    to prevent account enumeration.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ForgotPasswordThrottle]
+
+    @extend_schema(
+        request=ForgotPasswordSerializer,
+        responses={
+            200: OpenApiResponse(
+                description="If the account is eligible, a password reset email will be sent."
+            ),
+            400: OpenApiResponse(
+                description="Invalid request data."
+            ),
+            429: OpenApiResponse(
+                description="Too many requests."
+            ),
+        },
+    )
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        email = serializer.validated_data["email"]
+
+        generic_response = Response(
+            {
+                "detail": (
+                    "If the account is eligible, "
+                    "a password reset email will be sent."
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+        try:
+            with transaction.atomic():
+                try:
+                    user = (
+                        User.all_objects
+                        .select_for_update()
+                        .get(email=email)
+                    )
+                except User.DoesNotExist:
+                    return generic_response
+
+                if (
+                    user.deleted_at is not None
+                    or not user.is_active
+                    or user.status not in (
+                        User.AccountStatus.ACTIVE,
+                        User.AccountStatus.PENDING_VERIFICATION,
+                    )
+                ):
+                    return generic_response
+
+                reset_token = generate_password_reset_token(user.id)
+
+                create_outbox_event(
+                    event_type="users.password_reset_requested",
+                    aggregate_type="user",
+                    aggregate_id=user.id,
+                    payload={
+                        "email": user.email,
+                        "reset_token": reset_token,
+                    },
+                )
+
+        except Exception:
+            logger.exception(
+                "Failed to create password reset event."
+            )
+            raise
+
+        return generic_response
+
+
+class ResetPasswordView(APIView):
+    """
+    Reset a user's password using a signed, single-use token.
+
+    Eligible accounts:
+    - ACTIVE
+    - PENDING_VERIFICATION
+
+    The account status and email verification timestamp remain unchanged.
+    All existing refresh tokens are revoked after a successful reset.
+    No authentication cookies or JWT tokens are issued.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ResetPasswordThrottle]
+
+    @extend_schema(
+        request=ResetPasswordSerializer,
+        responses={
+            200: OpenApiResponse(
+                description="Password reset successfully."
+            ),
+            400: OpenApiResponse(
+                description="Invalid or expired token or invalid password."
+            ),
+            429: OpenApiResponse(
+                description="Too many requests."
+            ),
+        },
+    )
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        token = serializer.validated_data["token"]
+        new_password = serializer.validated_data["new_password"]
+
+        user_id = get_password_reset_user_id(token)
+
+        if user_id is None:
+            raise ValidationError({
+                "token": "Invalid or expired password reset token."
+            })
+
+        try:
+            with transaction.atomic():
+                try:
+                    user = (
+                        User.all_objects
+                        .select_for_update()
+                        .get(pk=user_id)
+                    )
+                except User.DoesNotExist:
+                    raise ValidationError({
+                        "token": "Invalid or expired password reset token."
+                    })
+
+                if (
+                    user.deleted_at is not None
+                    or not user.is_active
+                    or user.status not in (
+                        User.AccountStatus.ACTIVE,
+                        User.AccountStatus.PENDING_VERIFICATION,
+                    )
+                ):
+                    raise ValidationError({
+                        "token": "Invalid or expired password reset token."
+                    })
+
+                try:
+                    validate_password(
+                        new_password,
+                        user=user,
+                    )
+                except DjangoValidationError as exc:
+                    raise ValidationError({
+                        "new_password": list(exc.messages)
+                    })
+
+                if user.check_password(new_password):
+                    raise ValidationError({
+                        "new_password": (
+                            "New password must be different from "
+                            "the current password."
+                        )
+                    })
+
+                consumed_user_id = consume_password_reset_token(token)
+
+                if consumed_user_id != user.id:
+                    raise ValidationError({
+                        "token": "Invalid or expired password reset token."
+                    })
+
+                user.set_password(new_password)
+                user.save(update_fields=["password"])
+
+                create_outbox_event(
+                    event_type="users.password_changed",
+                    aggregate_type="user",
+                    aggregate_id=user.id,
+                    payload={
+                        "email": user.email,
+                    },
+                )
+
+                TokenCookieManager.blacklist_user_refresh_tokens(user)
+
+        except ValidationError:
+            raise
+
+        except Exception:
+            logger.exception(
+                "Unexpected error while resetting user password."
+            )
+            raise
+
+        response = Response(
+            {
+                "detail": (
+                    "Password reset successfully. "
+                    "Please log in with your new password."
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+        TokenCookieManager.delete_tokens_cookies(response)
+
+        return response

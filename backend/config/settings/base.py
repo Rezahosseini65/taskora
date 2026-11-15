@@ -214,6 +214,8 @@ REST_FRAMEWORK = {
         'user_login_throttle':'10/minute',
         "email_verification": "10/minute",
         'email_verification_resend': '5/minute',
+        "forgot_password": "5/hour",
+        "reset_password": "10/hour",
     },
 }
 

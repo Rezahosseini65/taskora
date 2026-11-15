@@ -1,3 +1,4 @@
+
 from django.urls import path
 
 from . import views
@@ -44,5 +45,15 @@ urlpatterns = [
         "auth/password/change/",
         views.UserChangePasswordView.as_view(),
         name="user-change-password",
+    ),
+    path(
+        "auth/password/forgot/",
+        views.ForgotPasswordView.as_view(),
+        name="forgot-password",
+    ),
+    path(
+        "auth/password/reset/",
+        views.ResetPasswordView.as_view(),
+        name="reset-password",
     ),
 ]

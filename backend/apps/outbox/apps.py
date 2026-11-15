@@ -11,6 +11,9 @@ class OutboxConfig(AppConfig):
         from apps.outbox.handlers.password_changed import (
             handle_password_changed,
         )
+        from apps.outbox.handlers.password_reset import (
+            handle_password_reset_requested,
+        )
         from apps.outbox.handlers.registry import registry
 
         registry.register(
@@ -21,4 +24,9 @@ class OutboxConfig(AppConfig):
         registry.register(
             "users.password_changed",
             handle_password_changed,
+        )
+
+        registry.register(
+            "users.password_reset_requested",
+            handle_password_reset_requested,
         )

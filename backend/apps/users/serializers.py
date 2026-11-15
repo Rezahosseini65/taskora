@@ -216,3 +216,42 @@ class UserChangePasswordSerializer(serializers.Serializer):
             })
 
         return attrs
+
+
+class ForgotPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    token = serializers.CharField(
+        required=True,
+        trim_whitespace=False,
+        write_only=True,
+    )
+    new_password = serializers.CharField(
+        required=True,
+        trim_whitespace=False,
+        write_only=True,
+        validators=[validate_strong_password],
+        style={"input_type": "password"},
+    )
+    confirm_new_password = serializers.CharField(
+        required=True,
+        trim_whitespace=False,
+        write_only=True,
+        style={"input_type": "password"},
+    )
+
+    def validate(self, attrs):
+        new_password = attrs["new_password"]
+        confirm_new_password = attrs["confirm_new_password"]
+
+        if new_password != confirm_new_password:
+            raise serializers.ValidationError({
+                "confirm_new_password": _("New passwords do not match.")
+            })
+
+        return attrs
