@@ -9,13 +9,14 @@ services:
       dockerfile: docker/django/Dockerfile
       target: development
     container_name: taskora_web
-    command: python manage.py runserver 0.0.0.0:8000
+    command: python -m debugpy --listen 0.0.0.0:5678 --wait-for-client manage.py runserver 0.0.0.0:8000 --noreload
     volumes:
       - ./backend:/app
       - static_volume:/app/staticfiles
       - media_volume:/app/media
     ports:
       - "8000:8000"
+      - "5678:5678"
     env_file:
       - .env
     environment:
@@ -26,6 +27,7 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+
 
   # =========================
   # PostgreSQL
