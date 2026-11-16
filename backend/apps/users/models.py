@@ -149,3 +149,65 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+
+
+class UserSession(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="sessions",
+    )
+
+    refresh_token_jti = models.CharField(
+        max_length=255,
+        unique=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    last_activity_at = models.DateTimeField(
+        default=timezone.now,
+    )
+
+    expires_at = models.DateTimeField()
+
+    revoked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    ip_address = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+    )
+
+    user_agent = models.CharField(
+        max_length=1000,
+        blank=True,
+    )
+
+    class Meta:
+        verbose_name = _("user session")
+        verbose_name_plural = _("user sessions")
+        ordering = ["-last_activity_at"]
+        indexes = [
+            models.Index(
+                fields=["user", "revoked_at"],
+                name="user_session_active_idx",
+            ),
+            models.Index(
+                fields=["expires_at"],
+                name="user_session_expiry_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.id}"

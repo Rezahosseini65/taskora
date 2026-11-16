@@ -1,9 +1,15 @@
+from uuid import UUID
+
 from django.conf import settings
+from django.utils import timezone
 
 from rest_framework.authentication import CSRFCheck
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+
+from apps.users.models import UserSession
+from apps.users.services.sessions import touch_session_activity
 
 
 class CookieJWTAuthentication(JWTAuthentication):
@@ -49,5 +55,30 @@ class CookieJWTAuthentication(JWTAuthentication):
             or user.status != user.AccountStatus.ACTIVE
         ):
             raise AuthenticationFailed("Your account is not active.")
+
+        # Validate the session associated with this access token.
+        try:
+            session_id = UUID(str(validated_token["sid"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AuthenticationFailed(
+                "Invalid or missing session."
+            ) from exc
+
+        session_exists = UserSession.objects.filter(
+            id=session_id,
+            user=user,
+            revoked_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        ).exists()
+
+        if not session_exists:
+            raise AuthenticationFailed(
+                "Session is invalid or expired."
+            )
+
+        request.session_id = session_id
+
+        # Update session activity with the configured throttle interval.
+        touch_session_activity(session_id, user.pk)
 
         return user, validated_token

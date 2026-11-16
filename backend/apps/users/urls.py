@@ -56,4 +56,19 @@ urlpatterns = [
         views.ResetPasswordView.as_view(),
         name="reset-password",
     ),
+    path(
+        "auth/sessions/",
+        views.UserSessionListView.as_view(),
+        name="user-session-list",
+    ),
+    path(
+        "auth/sessions/<uuid:session_id>/",
+        views.UserSessionRevokeView.as_view(),
+        name="user-session-revoke",
+    ),
+    path(
+        "auth/sessions/logout-all/",
+        views.UserLogoutAllSessionsView.as_view(),
+        name="user-session-logout-all",
+    ),
 ]

@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 
 from rest_framework import serializers
 
-from .models import User
+from .models import User, UserSession
 from .validators import validate_strong_password
 from apps.users.services.verification import generate_verification_token
 
@@ -60,7 +60,6 @@ class UserRegisterSerializer(serializers.Serializer):
             })
 
         return data
-
 
 
 class EmailVerificationSerializer(serializers.Serializer):
@@ -153,7 +152,6 @@ class UserLoginSerializer(serializers.Serializer):
 
         attrs["user"] = user
         return attrs
-
 
 
 class UserChangePasswordSerializer(serializers.Serializer):
@@ -255,3 +253,34 @@ class ResetPasswordSerializer(serializers.Serializer):
             })
 
         return attrs
+
+
+class UserSessionSerializer(serializers.ModelSerializer):
+    is_current = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserSession
+        fields = [
+            "id",
+            "is_current",
+            "created_at",
+            "last_activity_at",
+            "expires_at",
+            "ip_address",
+            "user_agent",
+        ]
+        read_only_fields = fields
+
+    def get_is_current(self, obj) -> bool:
+        request = self.context.get("request")
+
+        if request is None:
+            return False
+
+        current_session_id = getattr(
+            request,
+            "session_id",
+            None,
+        )
+
+        return str(obj.id) == str(current_session_id)

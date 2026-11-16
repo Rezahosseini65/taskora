@@ -9,16 +9,6 @@ from rest_framework_simplejwt.token_blacklist.models import (
 )
 
 
-def generate_access_refresh_tokens(user):
-    """
-    Generate access and refresh JWT tokens for a user.
-    """
-    refresh = RefreshToken.for_user(user)
-    access = refresh.access_token
-
-    return str(access), str(refresh)
-
-
 class TokenCookieManager:
     """
     Manage access and refresh JWT cookies.

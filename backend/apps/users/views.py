@@ -1,60 +1,71 @@
 import logging
+from uuid import UUID
 
-from django.db import IntegrityError, transaction
-from django.middleware.csrf import get_token
 from django.conf import settings
-from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
+from django.middleware.csrf import get_token
+from django.utils import timezone
+
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 
 from rest_framework import status
+from rest_framework.authentication import CSRFCheck
+from rest_framework.exceptions import (
+    PermissionDenied,
+    ValidationError,
+)
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.authentication import CSRFCheck
-from rest_framework.exceptions import PermissionDenied
-from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+
 from rest_framework_simplejwt.exceptions import TokenError
-from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.settings import api_settings
-from rest_framework.exceptions import ValidationError
+from rest_framework_simplejwt.tokens import RefreshToken
 
-from drf_spectacular.utils import extend_schema, OpenApiResponse
-
-from .models import User
 from apps.outbox.services import create_outbox_event
-from apps.users.services import otp, block
-from common.authentication.jwt import CookieJWTAuthentication
-from common.utils.services import (
-    TokenCookieManager,
-    generate_access_refresh_tokens,
+from apps.users.services import block, otp
+from apps.users.services.password_reset import (
+    consume_password_reset_token,
+    generate_password_reset_token,
+    get_password_reset_user_id,
 )
-from .serializers import (
-    UserRegisterSerializer,
-    EmailVerificationSerializer,
-    ResendVerificationEmailSerializer,
-    UserLoginSerializer,
-    UserChangePasswordSerializer,
-    ForgotPasswordSerializer,
-    ResetPasswordSerializer,
-)
-from .throttles import (
-    UserRegisterThrottle,
-    UserLoginThrottle,
-    EmailVerificationThrottle,
-    EmailVerificationResendThrottle,
-    ForgotPasswordThrottle,
-    ResetPasswordThrottle,
+from apps.users.services.sessions import (
+    SessionError,
+    create_session_tokens,
+    revoke_all_user_sessions,
+    revoke_session,
+    rotate_session_tokens,
 )
 from apps.users.services.verification import (
     generate_verification_token,
     verify_verification_token,
 )
-from apps.users.services.password_reset import (
-    generate_password_reset_token,
-    get_password_reset_user_id,
-    consume_password_reset_token,
+
+from common.authentication.jwt import CookieJWTAuthentication
+from common.utils.services import TokenCookieManager
+
+from .models import User, UserSession
+from .serializers import (
+    EmailVerificationSerializer,
+    ForgotPasswordSerializer,
+    ResetPasswordSerializer,
+    ResendVerificationEmailSerializer,
+    UserChangePasswordSerializer,
+    UserLoginSerializer,
+    UserRegisterSerializer,
+    UserSessionSerializer,
 )
+from .throttles import (
+    EmailVerificationResendThrottle,
+    EmailVerificationThrottle,
+    ForgotPasswordThrottle,
+    ResetPasswordThrottle,
+    UserLoginThrottle,
+    UserRegisterThrottle,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -246,8 +257,9 @@ class EmailVerificationView(APIView):
                 ]
             )
 
-        access_token, refresh_token = generate_access_refresh_tokens(
+        access_token, refresh_token, session = create_session_tokens(
             user=user,
+            request=request,
         )
 
         response = Response(
@@ -378,8 +390,9 @@ class UserLoginView(APIView):
         user = serializer.validated_data["user"]
 
         try:
-            access_token, refresh_token = generate_access_refresh_tokens(
-                user=user
+            access_token, refresh_token, session = create_session_tokens(
+                user=user,
+                request=request,
             )
 
             response = Response(
@@ -416,19 +429,18 @@ class UserLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        refresh_cookie_name = settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]
-        refresh_token = request.COOKIES.get(refresh_cookie_name)
+        session_id = UUID(str(request.auth["sid"]))
 
-        # Revoke the refresh token when one is available.
-        if refresh_token:
-            TokenCookieManager.blacklist_refresh_token(refresh_token)
+        revoke_session(
+            session_id=session_id,
+            user=request.user,
+        )
 
         response = Response(
             {"detail": "Logout successful."},
             status=status.HTTP_200_OK,
         )
 
-        # Always remove both authentication cookies.
         TokenCookieManager.delete_tokens_cookies(response)
 
         return response
@@ -436,8 +448,8 @@ class UserLogoutView(APIView):
 
 class RefreshAccessTokenView(APIView):
     """
-    Refresh the access token using the refresh token stored
-    in an HTTP-only cookie.
+    Refresh access and refresh tokens using the refresh token
+    stored in an HTTP-only cookie.
     """
 
     authentication_classes = []
@@ -469,7 +481,6 @@ class RefreshAccessTokenView(APIView):
         refresh_cookie_name = settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]
         refresh_token = request.COOKIES.get(refresh_cookie_name)
 
-        # Check whether the refresh cookie exists.
         if not refresh_token:
             response = Response(
                 {"detail": "No refresh token found."},
@@ -478,16 +489,12 @@ class RefreshAccessTokenView(APIView):
             TokenCookieManager.delete_tokens_cookies(response)
             return response
 
-        # Enforce CSRF protection for cookie-based authentication.
         self.enforce_csrf(request)
 
-        # Validate the refresh token and retrieve its user.
         try:
             refresh = RefreshToken(refresh_token)
 
-            user_id_claim = api_settings.USER_ID_CLAIM
-            user_id = refresh[user_id_claim]
-
+            user_id = refresh[api_settings.USER_ID_CLAIM]
             user = User.all_objects.get(pk=user_id)
 
         except (TokenError, User.DoesNotExist, KeyError):
@@ -502,14 +509,10 @@ class RefreshAccessTokenView(APIView):
             TokenCookieManager.delete_tokens_cookies(response)
             return response
 
-        # Check whether the user account is eligible for token refresh.
         if (
             user.deleted_at is not None
             or not user.is_active
-            or user.status in (
-                User.AccountStatus.SUSPENDED,
-                User.AccountStatus.DEACTIVATED,
-            )
+            or user.status != User.AccountStatus.ACTIVE
         ):
             response = Response(
                 {"detail": "Your account is not active."},
@@ -518,15 +521,15 @@ class RefreshAccessTokenView(APIView):
             TokenCookieManager.delete_tokens_cookies(response)
             return response
 
-        # Validate and rotate the refresh token.
-        serializer = TokenRefreshSerializer(
-            data={"refresh": refresh_token}
-        )
-
         try:
-            serializer.is_valid(raise_exception=True)
+            access_token, new_refresh_token, session = (
+                rotate_session_tokens(
+                    user=user,
+                    refresh_token=refresh_token,
+                )
+            )
 
-        except TokenError:
+        except SessionError:
             response = Response(
                 {
                     "detail": (
@@ -538,8 +541,6 @@ class RefreshAccessTokenView(APIView):
             TokenCookieManager.delete_tokens_cookies(response)
             return response
 
-        token_data = serializer.validated_data
-
         response = Response(
             {"detail": "Access token refreshed successfully."},
             status=status.HTTP_200_OK,
@@ -547,17 +548,14 @@ class RefreshAccessTokenView(APIView):
 
         TokenCookieManager.set_access_cookie(
             response,
-            token_data["access"],
+            access_token,
+        )
+        TokenCookieManager.set_refresh_cookie(
+            response,
+            new_refresh_token,
         )
 
-        if "refresh" in token_data:
-            TokenCookieManager.set_refresh_cookie(
-                response,
-                token_data["refresh"],
-            )
-
         return response
-
 
 
 class UserChangePasswordView(APIView):
@@ -633,8 +631,7 @@ class UserChangePasswordView(APIView):
                     },
                 )
 
-                TokenCookieManager.blacklist_user_refresh_tokens(user)
-
+                revoke_all_user_sessions(user)
             response = Response(
                 {
                     "detail": (
@@ -847,7 +844,7 @@ class ResetPasswordView(APIView):
                     },
                 )
 
-                TokenCookieManager.blacklist_user_refresh_tokens(user)
+                revoke_all_user_sessions(user)
 
         except ValidationError:
             raise
@@ -864,6 +861,111 @@ class ResetPasswordView(APIView):
                     "Password reset successfully. "
                     "Please log in with your new password."
                 )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+        TokenCookieManager.delete_tokens_cookies(response)
+
+        return response
+
+
+class UserSessionListView(APIView):
+    """
+    List all active sessions belonging to the authenticated user.
+    """
+
+    authentication_classes = [CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={
+            200: UserSessionSerializer(many=True),
+            401: OpenApiResponse(
+                description="Authentication failed."
+            ),
+        },
+    )
+    def get(self, request):
+        sessions = UserSession.objects.filter(
+            user=request.user,
+            revoked_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        )
+
+        serializer = UserSessionSerializer(
+            sessions,
+            many=True,
+            context={"request": request},
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class UserSessionRevokeView(APIView):
+    """
+    Revoke one session belonging to the authenticated user.
+    """
+
+    authentication_classes = [CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={
+            204: OpenApiResponse(
+                description="Session revoked successfully."
+            ),
+            401: OpenApiResponse(
+                description="Authentication failed."
+            ),
+            404: OpenApiResponse(
+                description="Session not found."
+            ),
+        },
+    )
+    def delete(self, request, session_id):
+        revoked = revoke_session(
+            session_id=session_id,
+            user=request.user,
+        )
+
+        if not revoked:
+            return Response(
+                {"detail": "Session not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class UserLogoutAllSessionsView(APIView):
+    """
+    Revoke all sessions belonging to the authenticated user.
+    """
+
+    authentication_classes = [CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={
+            200: OpenApiResponse(
+                description="All sessions revoked successfully."
+            ),
+            401: OpenApiResponse(
+                description="Authentication failed."
+            ),
+        },
+    )
+    def post(self, request):
+        revoked_count = revoke_all_user_sessions(request.user)
+
+        response = Response(
+            {
+                "detail": "All sessions have been revoked successfully.",
+                "revoked_count": revoked_count,
             },
             status=status.HTTP_200_OK,
         )
