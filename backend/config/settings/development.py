@@ -20,6 +20,10 @@ MIDDLEWARE.insert(
     "debug_toolbar.middleware.DebugToolbarMiddleware",
 )
 
+MIDDLEWARE += [
+    "common.middleware.query_middleware.QueryCountMiddleware",
+]
+
 # Debug Toolbar access
 SPECTACULAR_SETTINGS = {
     'TITLE': 'API Documentation',
