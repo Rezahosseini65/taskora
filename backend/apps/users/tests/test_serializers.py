@@ -1,12 +1,17 @@
 from types import SimpleNamespace
+from io import BytesIO
 
+from PIL import Image
+
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 
-from apps.users.models import User
+from apps.users.models import User, UserProfile
 from apps.users.serializers import (
     UserRegisterSerializer,
     UserLoginSerializer,
     UserChangePasswordSerializer,
+    UserMeSerializer,
 )
 from apps.users.services.verification import verify_verification_token
 
@@ -320,3 +325,231 @@ class UserChangePasswordSerializerTests(TestCase):
 
         self.assertFalse(serializer.is_valid())
         self.assertIn("new_password", serializer.errors)
+
+
+class UserMeSerializerTests(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="profile@example.com",
+            password="StrongPassword123",
+        )
+
+        self.profile = UserProfile.objects.create(
+            user=self.user,
+            first_name="Reza",
+            last_name="Hosseini",
+            display_name="Reza",
+            bio="Initial bio",
+            phone_number="09123456789",
+        )
+
+    def create_image(self, image_format="PNG", size=(32, 32)):
+        image_file = BytesIO()
+        image = Image.new("RGB", size, color="red")
+        image.save(image_file, format=image_format)
+        image_file.seek(0)
+
+        extension = image_format.lower()
+
+        return SimpleUploadedFile(
+            f"avatar.{extension}",
+            image_file.read(),
+            content_type=f"image/{extension}",
+        )
+
+    def test_serializer_returns_user_and_profile_data(self):
+        serializer = UserMeSerializer(instance=self.user)
+
+        data = serializer.data
+
+        self.assertEqual(data["email"], self.user.email)
+        self.assertEqual(data["first_name"], "Reza")
+        self.assertEqual(data["last_name"], "Hosseini")
+        self.assertEqual(data["display_name"], "Reza")
+        self.assertEqual(data["bio"], "Initial bio")
+        self.assertEqual(data["phone_number"], "09123456789")
+
+    def test_update_profile_fields(self):
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={
+                "first_name": "Ali",
+                "last_name": "Ahmadi",
+                "display_name": "Ali",
+                "bio": "Updated bio",
+                "phone_number": "09111111111",
+            },
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        self.profile.refresh_from_db()
+
+        self.assertEqual(self.profile.first_name, "Ali")
+        self.assertEqual(self.profile.last_name, "Ahmadi")
+        self.assertEqual(self.profile.display_name, "Ali")
+        self.assertEqual(self.profile.bio, "Updated bio")
+        self.assertEqual(self.profile.phone_number, "09111111111")
+
+    def test_update_user_fields(self):
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={
+                "locale": "fa",
+                "timezone": "Asia/Tehran",
+            },
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        self.user.refresh_from_db()
+
+        self.assertEqual(self.user.locale, "fa")
+        self.assertEqual(self.user.timezone, "Asia/Tehran")
+
+    def test_update_creates_profile_if_missing(self):
+        self.profile.delete()
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"first_name": "New"},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        profile = UserProfile.objects.get(user=self.user)
+
+        self.assertEqual(profile.first_name, "New")
+
+    def test_read_only_fields_are_not_updated(self):
+        original_email = self.user.email
+        original_id = self.user.id
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={
+                "email": "changed@example.com",
+                "id": "00000000-0000-0000-0000-000000000001",
+            },
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        self.user.refresh_from_db()
+
+        self.assertEqual(self.user.email, original_email)
+        self.assertEqual(self.user.id, original_id)
+
+    def test_valid_png_avatar_is_accepted(self):
+        avatar = self.create_image("PNG")
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": avatar},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_valid_jpeg_avatar_is_accepted(self):
+        avatar = self.create_image("JPEG")
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": avatar},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_valid_webp_avatar_is_accepted(self):
+        avatar = self.create_image("WEBP")
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": avatar},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_unsupported_avatar_format_is_rejected(self):
+        avatar = self.create_image("GIF")
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": avatar},
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("avatar", serializer.errors)
+
+    def test_invalid_image_is_rejected(self):
+        avatar = SimpleUploadedFile(
+            "fake.png",
+            b"this is not an image",
+            content_type="image/png",
+        )
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": avatar},
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("avatar", serializer.errors)
+
+    def test_avatar_larger_than_5mb_is_rejected(self):
+        valid_image = self.create_image("PNG")
+        content = valid_image.read()
+
+        oversized_avatar = SimpleUploadedFile(
+            "large.png",
+            content + (b"x" * (5 * 1024 * 1024)),
+            content_type="image/png",
+        )
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": oversized_avatar},
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("avatar", serializer.errors)
+
+    def test_avatar_exceeding_max_dimensions_is_rejected(self):
+        avatar = self.create_image("PNG", size=(4097, 100))
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": avatar},
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("avatar", serializer.errors)
+
+    def test_avatar_can_be_cleared(self):
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": None},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        self.profile.refresh_from_db()
+        self.assertFalse(self.profile.avatar)

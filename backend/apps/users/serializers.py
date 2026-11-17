@@ -2,10 +2,11 @@ from django.contrib.auth import authenticate
 from django.utils.translation import gettext_lazy as _
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 
 from rest_framework import serializers
 
-from .models import User, UserSession
+from .models import User, UserProfile, UserSession
 from .validators import validate_strong_password
 from apps.users.services.verification import generate_verification_token
 
@@ -284,3 +285,132 @@ class UserSessionSerializer(serializers.ModelSerializer):
         )
 
         return str(obj.id) == str(current_session_id)
+
+
+class UserMeSerializer(serializers.ModelSerializer):
+    first_name = serializers.CharField(
+        source="profile.first_name",
+        max_length=150,
+        required=False,
+        allow_blank=True,
+    )
+    last_name = serializers.CharField(
+        source="profile.last_name",
+        max_length=150,
+        required=False,
+        allow_blank=True,
+    )
+    display_name = serializers.CharField(
+        source="profile.display_name",
+        max_length=150,
+        required=False,
+        allow_blank=True,
+    )
+    avatar = serializers.ImageField(
+        source="profile.avatar",
+        required=False,
+        allow_null=True,
+    )
+    bio = serializers.CharField(
+        source="profile.bio",
+        required=False,
+        allow_blank=True,
+    )
+    phone_number = serializers.CharField(
+        source="profile.phone_number",
+        max_length=20,
+        required=False,
+        allow_blank=True,
+    )
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "email",
+            "locale",
+            "timezone",
+            "first_name",
+            "last_name",
+            "display_name",
+            "avatar",
+            "bio",
+            "phone_number",
+        ]
+        read_only_fields = ["id", "email"]
+
+    def update(self, instance, validated_data):
+        profile_data = validated_data.pop("profile", {})
+
+        with transaction.atomic():
+            if profile_data:
+                profile, _ = UserProfile.objects.get_or_create(
+                    user=instance
+                )
+
+                for attr, value in profile_data.items():
+                    setattr(profile, attr, value)
+
+                profile.save()
+
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+
+            if validated_data:
+                instance.save()
+
+        return instance
+
+    def validate_avatar(self, value):
+        if value is None:
+            return None
+
+        max_size = 5 * 1024 * 1024  # 5 MB
+        allowed_formats = {"JPEG", "PNG", "WEBP"}
+        max_dimensions = (4096, 4096)
+
+        if value.size > max_size:
+            raise serializers.ValidationError(
+                _("Avatar file size must not exceed 5 MB.")
+            )
+
+        from PIL import Image, UnidentifiedImageError
+
+        try:
+            image = Image.open(value)
+            image.verify()
+
+            if image.format not in allowed_formats:
+                raise serializers.ValidationError(
+                    _("Only JPEG, PNG, and WebP images are allowed.")
+                )
+
+            value.seek(0)
+            image = Image.open(value)
+
+            if image.width > max_dimensions[0] or image.height > max_dimensions[1]:
+                raise serializers.ValidationError(
+                    _("Avatar dimensions must not exceed 4096x4096 pixels.")
+                )
+
+        except (UnidentifiedImageError, OSError, SyntaxError):
+            raise serializers.ValidationError(
+                _("The uploaded file is not a valid image.")
+            )
+
+        finally:
+            value.seek(0)
+
+        return value
+
+    def validate_timezone(self, value):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise serializers.ValidationError(
+                _("Enter a valid timezone.")
+            )
+
+        return value

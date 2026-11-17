@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
@@ -6,6 +7,11 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from .managers import CustomUserManager, AllUsersManager
+
+
+def profile_avatar_upload_to(instance, filename):
+    extension = Path(filename).suffix.lower()
+    return f"profiles/avatars/{uuid.uuid4().hex}{extension}"
 
 
 class User(AbstractBaseUser, PermissionsMixin):
@@ -149,6 +155,77 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+
+
+class UserProfile(models.Model):
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="profile",
+        verbose_name=_("user"),
+    )
+
+    first_name = models.CharField(
+        _("first name"),
+        max_length=150,
+        blank=True,
+    )
+
+    last_name = models.CharField(
+        _("last name"),
+        max_length=150,
+        blank=True,
+    )
+
+    display_name = models.CharField(
+        _("display name"),
+        max_length=150,
+        blank=True,
+    )
+
+    avatar = models.ImageField(
+        _("avatar"),
+        upload_to=profile_avatar_upload_to,
+        blank=True,
+        null=True,
+    )
+
+    bio = models.TextField(
+        _("bio"),
+        blank=True,
+    )
+
+    phone_number = models.CharField(
+        _("phone number"),
+        max_length=20,
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(
+        _("created at"),
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        _("updated at"),
+        auto_now=True,
+    )
+
+    class Meta:
+        verbose_name = _("user profile")
+        verbose_name_plural = _("user profiles")
+
+    def __str__(self):
+        return f"Profile: {self.user.email}"
+
+    @property
+    def display_name_value(self):
+        if self.display_name:
+            return self.display_name
+
+        full_name = f"{self.first_name} {self.last_name}".strip()
+
+        return full_name or self.user.email.split("@")[0]
 
 
 class UserSession(models.Model):

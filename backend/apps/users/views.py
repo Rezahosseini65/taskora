@@ -46,7 +46,7 @@ from apps.users.services.verification import (
 from common.authentication.jwt import CookieJWTAuthentication
 from common.utils.services import TokenCookieManager
 
-from .models import User, UserSession
+from .models import User, UserSession, UserProfile
 from .serializers import (
     EmailVerificationSerializer,
     ForgotPasswordSerializer,
@@ -56,6 +56,7 @@ from .serializers import (
     UserLoginSerializer,
     UserRegisterSerializer,
     UserSessionSerializer,
+    UserMeSerializer,
 )
 from .throttles import (
     EmailVerificationResendThrottle,
@@ -256,6 +257,8 @@ class EmailVerificationView(APIView):
                     "updated_at",
                 ]
             )
+
+            UserProfile.objects.get_or_create(user=user)
 
         access_token, refresh_token, session = create_session_tokens(
             user=user,
@@ -868,6 +871,34 @@ class ResetPasswordView(APIView):
         TokenCookieManager.delete_tokens_cookies(response)
 
         return response
+
+
+class UserMeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = UserMeSerializer(
+            instance=request.user,
+            context={"request": request},
+        )
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        serializer = UserMeSerializer(
+            instance=request.user,
+            data=request.data,
+            partial=True,
+            context={"request": request},
+        )
+
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK,
+        )
 
 
 class UserSessionListView(APIView):

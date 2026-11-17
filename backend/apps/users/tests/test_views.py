@@ -1,7 +1,11 @@
 from uuid import uuid4, UUID
 from unittest.mock import ANY, patch
 from datetime import timedelta
+from io import BytesIO
 
+from PIL import Image
+
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from django.conf import settings
 from django.utils import timezone
@@ -14,7 +18,7 @@ from rest_framework_simplejwt.token_blacklist.models import (
 )
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
-from apps.users.models import User, UserSession
+from apps.users.models import User, UserSession, UserProfile
 from apps.outbox.models import OutboxEvent
 from apps.users.services.verification import verify_verification_token
 from apps.users.services import block
@@ -175,7 +179,9 @@ class EmailVerificationViewTests(APITestCase):
         mocked_create_session,
     ):
         mocked_verify_token.return_value = self.user.id
-
+        self.assertFalse(
+            UserProfile.objects.filter(user=self.user).exists()
+        )
         response = self.client.post(
             self.url,
             self.valid_data,
@@ -192,6 +198,13 @@ class EmailVerificationViewTests(APITestCase):
 
         self.assertEqual(self.user.status, User.AccountStatus.ACTIVE)
         self.assertIsNotNone(self.user.email_verified_at)
+        self.assertTrue(
+            UserProfile.objects.filter(user=self.user).exists()
+        )
+        self.assertEqual(
+            UserProfile.objects.filter(user=self.user).count(),
+            1,
+        )
 
         mocked_verify_token.assert_called_once_with(
             self.valid_data["verification_token"]
@@ -2130,6 +2143,210 @@ class RefreshAccessTokenViewTests(APITestCase):
             response.status_code,
             status.HTTP_403_FORBIDDEN,
         )
+
+
+class UserMeViewTests(APITestCase):
+
+    def setUp(self):
+        self.url = reverse("users:me")
+
+        self.user = User.objects.create_user(
+            email="profile@example.com",
+            password="StrongPassword123",
+        )
+
+        self.profile = UserProfile.objects.create(
+            user=self.user,
+            first_name="Reza",
+            last_name="Hosseini",
+            display_name="Reza",
+            bio="Initial bio",
+            phone_number="09123456789",
+        )
+
+        self.client.force_authenticate(user=self.user)
+
+    def create_image(self, image_format="PNG", size=(32, 32)):
+        image_file = BytesIO()
+        image = Image.new("RGB", size, color="red")
+        image.save(image_file, format=image_format)
+        image_file.seek(0)
+
+        extension = image_format.lower()
+
+        return SimpleUploadedFile(
+            f"avatar.{extension}",
+            image_file.read(),
+            content_type=f"image/{extension}",
+        )
+
+    def test_get_profile_successfully(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["email"], self.user.email)
+        self.assertEqual(response.data["first_name"], "Reza")
+        self.assertEqual(response.data["last_name"], "Hosseini")
+        self.assertEqual(response.data["display_name"], "Reza")
+        self.assertEqual(response.data["bio"], "Initial bio")
+        self.assertEqual(
+            response.data["phone_number"],
+            "09123456789",
+        )
+
+    def test_get_profile_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_patch_profile_fields(self):
+        response = self.client.patch(
+            self.url,
+            {
+                "first_name": "Ali",
+                "last_name": "Ahmadi",
+                "display_name": "Ali",
+                "bio": "Updated bio",
+                "phone_number": "09111111111",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.profile.refresh_from_db()
+
+        self.assertEqual(self.profile.first_name, "Ali")
+        self.assertEqual(self.profile.last_name, "Ahmadi")
+        self.assertEqual(self.profile.display_name, "Ali")
+        self.assertEqual(self.profile.bio, "Updated bio")
+        self.assertEqual(self.profile.phone_number, "09111111111")
+
+    def test_patch_user_fields(self):
+        response = self.client.patch(
+            self.url,
+            {
+                "locale": "fa",
+                "timezone": "Asia/Tehran",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.user.refresh_from_db()
+
+        self.assertEqual(self.user.locale, "fa")
+        self.assertEqual(self.user.timezone, "Asia/Tehran")
+
+    def test_patch_creates_profile_if_missing(self):
+        self.profile.delete()
+
+        response = self.client.patch(
+            self.url,
+            {"first_name": "New"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        profile = UserProfile.objects.get(user=self.user)
+        self.assertEqual(profile.first_name, "New")
+
+    def test_patch_email_is_ignored(self):
+        original_email = self.user.email
+
+        response = self.client.patch(
+            self.url,
+            {"email": "changed@example.com"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, original_email)
+
+    def test_patch_invalid_timezone_returns_400(self):
+        response = self.client.patch(
+            self.url,
+            {"timezone": "Invalid/Timezone"},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    def test_patch_invalid_avatar_returns_400(self):
+        avatar = SimpleUploadedFile(
+            "fake.png",
+            b"this is not an image",
+            content_type="image/png",
+        )
+
+        response = self.client.patch(
+            self.url,
+            {"avatar": avatar},
+            format="multipart",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    def test_patch_valid_avatar(self):
+        avatar = self.create_image("PNG")
+
+        response = self.client.patch(
+            self.url,
+            {"avatar": avatar},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.profile.refresh_from_db()
+        self.assertTrue(self.profile.avatar)
+
+        self.assertTrue(
+            self.profile.avatar.name.startswith(
+                "profiles/avatars/"
+            )
+        )
+
+    def test_patch_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+
+        response = self.client.patch(
+            self.url,
+            {"first_name": "Ali"},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_patch_empty_data_does_not_change_profile(self):
+        response = self.client.patch(
+            self.url,
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.first_name, "Reza")
 
 
 class UserSessionListViewTests(APITestCase):

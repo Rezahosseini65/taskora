@@ -57,6 +57,11 @@ urlpatterns = [
         name="reset-password",
     ),
     path(
+        "auth/me/",
+        views.UserMeView.as_view(),
+        name="me",
+    ),
+    path(
         "auth/sessions/",
         views.UserSessionListView.as_view(),
         name="user-session-list",
