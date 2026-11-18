@@ -5,6 +5,7 @@ from PIL import Image
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from django.db import transaction
 
 from apps.users.models import User, UserProfile
 from apps.users.serializers import (
@@ -553,3 +554,116 @@ class UserMeSerializerTests(TestCase):
 
         self.profile.refresh_from_db()
         self.assertFalse(self.profile.avatar)
+
+    def test_old_avatar_is_deleted_after_replacement(self):
+        old_avatar = self.create_image("PNG")
+        self.profile.avatar.save(
+            "old.png",
+            old_avatar,
+            save=True,
+        )
+        old_avatar_name = self.profile.avatar.name
+        storage = self.profile.avatar.storage
+
+        new_avatar = self.create_image("JPEG")
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": new_avatar},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            serializer.save()
+
+        self.assertFalse(storage.exists(old_avatar_name))
+
+        self.profile.refresh_from_db()
+        self.assertTrue(storage.exists(self.profile.avatar.name))
+        self.assertNotEqual(self.profile.avatar.name, old_avatar_name)
+
+    def test_old_avatar_is_deleted_after_clearing(self):
+        old_avatar = self.create_image("PNG")
+        self.profile.avatar.save(
+            "old.png",
+            old_avatar,
+            save=True,
+        )
+        old_avatar_name = self.profile.avatar.name
+        storage = self.profile.avatar.storage
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": None},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            serializer.save()
+
+        self.assertFalse(storage.exists(old_avatar_name))
+
+        self.profile.refresh_from_db()
+        self.assertFalse(self.profile.avatar)
+
+    def test_old_avatar_is_preserved_when_other_fields_are_updated(self):
+        old_avatar = self.create_image("PNG")
+        self.profile.avatar.save(
+            "old.png",
+            old_avatar,
+            save=True,
+        )
+        old_avatar_name = self.profile.avatar.name
+        storage = self.profile.avatar.storage
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"bio": "Updated bio"},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            serializer.save()
+
+        self.profile.refresh_from_db()
+
+        self.assertTrue(storage.exists(old_avatar_name))
+        self.assertEqual(self.profile.avatar.name, old_avatar_name)
+        self.assertEqual(self.profile.bio, "Updated bio")
+
+    def test_old_avatar_is_preserved_when_transaction_rolls_back(self):
+        old_avatar = self.create_image("PNG")
+        self.profile.avatar.save(
+            "old.png",
+            old_avatar,
+            save=True,
+        )
+        old_avatar_name = self.profile.avatar.name
+        storage = self.profile.avatar.storage
+
+        new_avatar = self.create_image("JPEG")
+
+        serializer = UserMeSerializer(
+            instance=self.user,
+            data={"avatar": new_avatar},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        with self.assertRaises(RuntimeError):
+            with self.captureOnCommitCallbacks(execute=True):
+                with transaction.atomic():
+                    serializer.save()
+                    raise RuntimeError("Simulated transaction rollback")
+
+        self.assertTrue(storage.exists(old_avatar_name))
+
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.avatar.name, old_avatar_name)

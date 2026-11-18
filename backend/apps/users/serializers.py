@@ -1,8 +1,8 @@
 from django.contrib.auth import authenticate
 from django.utils.translation import gettext_lazy as _
 from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from rest_framework import serializers
 
@@ -342,22 +342,56 @@ class UserMeSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         profile_data = validated_data.pop("profile", {})
 
-        with transaction.atomic():
-            if profile_data:
-                profile, _ = UserProfile.objects.get_or_create(
-                    user=instance
-                )
+        new_avatar_name = None
+        avatar_storage = None
+        old_avatar_name = None
 
-                for attr, value in profile_data.items():
-                    setattr(profile, attr, value)
+        try:
+            with transaction.atomic():
+                if profile_data:
+                    profile, _ = UserProfile.objects.get_or_create(
+                        user=instance
+                    )
 
-                profile.save()
+                    old_avatar_name = (
+                        profile.avatar.name if profile.avatar else None
+                    )
+                    avatar_storage = profile.avatar.storage
 
-            for attr, value in validated_data.items():
-                setattr(instance, attr, value)
+                    for attr, value in profile_data.items():
+                        setattr(profile, attr, value)
 
-            if validated_data:
-                instance.save()
+                    profile.save()
+
+                    new_avatar_name = (
+                        profile.avatar.name if profile.avatar else None
+                    )
+
+                    if (
+                        "avatar" in profile_data
+                        and old_avatar_name
+                        and old_avatar_name != new_avatar_name
+                    ):
+                        transaction.on_commit(
+                            lambda storage=avatar_storage, name=old_avatar_name:
+                                storage.delete(name)
+                        )
+
+                for attr, value in validated_data.items():
+                    setattr(instance, attr, value)
+
+                if validated_data:
+                    instance.save()
+
+        except Exception:
+            if (
+                new_avatar_name
+                and new_avatar_name != old_avatar_name
+                and avatar_storage
+            ):
+                avatar_storage.delete(new_avatar_name)
+
+            raise
 
         return instance
 
