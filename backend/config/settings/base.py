@@ -45,6 +45,7 @@ THIRD_PARTY_APPS = [
     'django_celery_beat',
     'django_celery_results',
     "rest_framework_simplejwt.token_blacklist",
+    "drf_spectacular",
 ]
 
 INSTALLED_APPS = [
@@ -217,6 +218,21 @@ REST_FRAMEWORK = {
         "forgot_password": "5/hour",
         "reset_password": "10/hour",
     },
+}
+
+# =========================
+# Debug Toolbar Tools
+# =========================
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Taskora API",
+    "DESCRIPTION": "REST API documentation for Taskora.",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SERVE_PERMISSIONS": [
+        "rest_framework.permissions.AllowAny",
+    ],
+    "SERVE_AUTHENTICATION": [],
 }
 
 # =========================

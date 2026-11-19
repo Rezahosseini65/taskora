@@ -14,12 +14,14 @@ class UserRegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     password = serializers.CharField(
         required=True,
+        write_only=True,
         trim_whitespace=False,
         validators=[validate_strong_password],
         style={"input_type": "password"}
     )
     confirm_password = serializers.CharField(
         required=True,
+        write_only=True,
         trim_whitespace=False,
         style={"input_type": "password"}
     )

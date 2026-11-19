@@ -11,7 +11,6 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1", "web", '0.0.0.0']
 
 # Django Debug Toolbar
 INSTALLED_APPS += [
-    'drf_spectacular',
     "debug_toolbar",
 ]
 
@@ -23,16 +22,6 @@ MIDDLEWARE.insert(
 MIDDLEWARE += [
     "common.middleware.query_middleware.QueryCountMiddleware",
 ]
-
-# Debug Toolbar access
-SPECTACULAR_SETTINGS = {
-    'TITLE': 'API Documentation',
-    'DESCRIPTION': 'API documentation for Your Project',
-    'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': False,
-    'SERVE_PERMISSIONS': ['rest_framework.permissions.AllowAny'],
-    'SERVE_AUTHENTICATION': []
-}
 
 INTERNAL_IPS = [
     '127.0.0.1',

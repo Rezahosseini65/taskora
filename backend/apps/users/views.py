@@ -8,14 +8,10 @@ from django.db import IntegrityError, transaction
 from django.middleware.csrf import get_token
 from django.utils import timezone
 
-from drf_spectacular.utils import OpenApiResponse, extend_schema
-
 from rest_framework import status
 from rest_framework.authentication import CSRFCheck
-from rest_framework.exceptions import (
-    PermissionDenied,
-    ValidationError,
-)
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -23,6 +19,8 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
+
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 
 from apps.outbox.services import create_outbox_event
 from apps.users.services import block, otp
@@ -46,7 +44,7 @@ from apps.users.services.verification import (
 from common.authentication.jwt import CookieJWTAuthentication
 from common.utils.services import TokenCookieManager
 
-from .models import User, UserSession, UserProfile
+from .models import User, UserProfile, UserSession
 from .serializers import (
     EmailVerificationSerializer,
     ForgotPasswordSerializer,
@@ -54,9 +52,9 @@ from .serializers import (
     ResendVerificationEmailSerializer,
     UserChangePasswordSerializer,
     UserLoginSerializer,
+    UserMeSerializer,
     UserRegisterSerializer,
     UserSessionSerializer,
-    UserMeSerializer,
 )
 from .throttles import (
     EmailVerificationResendThrottle,
@@ -69,6 +67,25 @@ from .throttles import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _detail_response(example: str, description: str) -> OpenApiResponse:
+    """
+    Build a documented JSON response containing a single detail field.
+    """
+    return OpenApiResponse(
+        response={
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "type": "string",
+                    "example": example,
+                },
+            },
+            "required": ["detail"],
+        },
+        description=description,
+    )
 
 
 def _activate_resend_generation_after_commit(user_id, request_id):
@@ -93,22 +110,58 @@ def _activate_resend_generation_after_commit(user_id, request_id):
 
 class UserRegisterView(APIView):
     """
-    Handle user registration and create an email verification event.
+    Register a user and create an email verification event.
 
     User creation and Outbox event creation are performed
     within a single database transaction.
     """
 
-    throttle_classes = [UserRegisterThrottle]
     authentication_classes = []
+    parser_classes = [JSONParser]
+    throttle_classes = [UserRegisterThrottle]
 
     @extend_schema(
+        operation_id="auth_register",
+        summary="Register a new user",
+        description=(
+            "Create a user account and an email verification Outbox event. "
+            "The account remains pending verification until the email "
+            "verification process is completed. "
+            "The verification token is returned in the response."
+        ),
         request=UserRegisterSerializer,
         responses={
             201: OpenApiResponse(
-                description="Registration successful. Email verification required."
+                response={
+                    "type": "object",
+                    "properties": {
+                        "detail": {
+                            "type": "string",
+                            "example": (
+                                "Registration successful. "
+                                "Please verify your email address."
+                            ),
+                        },
+                        "verification_token": {
+                            "type": "string",
+                        },
+                    },
+                    "required": ["detail", "verification_token"],
+                },
+                description=(
+                    "Registration successful. Email verification required."
+                ),
+            ),
+            400: OpenApiResponse(
+                description=(
+                    "Invalid registration data or email address already in use."
+                ),
+            ),
+            429: OpenApiResponse(
+                description="Too many registration requests.",
             ),
         },
+        auth=[],
     )
     def post(self, request):
         serializer = UserRegisterSerializer(data=request.data)
@@ -173,17 +226,46 @@ class UserRegisterView(APIView):
 
 class EmailVerificationView(APIView):
     """
-    Verify a user's email address using a signed verification token
-    and a one-time verification code.
+    Verify a user's email address using a signed token and one-time code.
 
-    Upon successful verification, activate the account and issue
+    On success, activate the account, create its profile, and issue
     access and refresh JWT tokens through HttpOnly cookies.
     """
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    parser_classes = [JSONParser]
     throttle_classes = [EmailVerificationThrottle]
 
+    @extend_schema(
+        operation_id="auth_verify_email",
+        summary="Verify email address",
+        description=(
+            "Verify a user's email address using the signed verification "
+            "token received during registration and a one-time verification "
+            "code. On success, the account is activated, a profile is created, "
+            "and access and refresh JWT tokens are issued through HttpOnly "
+            "cookies."
+        ),
+        request=EmailVerificationSerializer,
+        responses={
+            200: _detail_response(
+                "Email verified successfully.",
+                "Email verified and account activated.",
+            ),
+            400: OpenApiResponse(
+                description=(
+                    "Invalid or expired verification token/code, "
+                    "or account does not require verification."
+                ),
+            ),
+            429: _detail_response(
+                "Too many failed attempts. Please try again later.",
+                "Too many failed verification attempts.",
+            ),
+        },
+        auth=[],
+    )
     def post(self, request):
         serializer = EmailVerificationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -266,9 +348,7 @@ class EmailVerificationView(APIView):
         )
 
         response = Response(
-            {
-                "detail": "Email verified successfully."
-            },
+            {"detail": "Email verified successfully."},
             status=status.HTTP_200_OK,
         )
 
@@ -288,8 +368,34 @@ class ResendVerificationEmailView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    parser_classes = [JSONParser]
     throttle_classes = [EmailVerificationResendThrottle]
 
+    @extend_schema(
+        operation_id="auth_resend_verification_email",
+        summary="Resend verification email",
+        description=(
+            "Request a new email verification code using the signed "
+            "verification token received during registration. A generic "
+            "response is returned regardless of account eligibility to "
+            "prevent account enumeration. The request may be subject to "
+            "a resend cooldown."
+        ),
+        request=ResendVerificationEmailSerializer,
+        responses={
+            200: _detail_response(
+                "If the account is eligible, a verification email will be sent.",
+                "Generic response returned regardless of account eligibility.",
+            ),
+            400: OpenApiResponse(
+                description="Invalid request data.",
+            ),
+            429: OpenApiResponse(
+                description="Too many resend requests.",
+            ),
+        },
+        auth=[],
+    )
     def post(self, request):
         serializer = ResendVerificationEmailSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -371,18 +477,35 @@ class ResendVerificationEmailView(APIView):
 
 
 class UserLoginView(APIView):
-    throttle_classes = [UserLoginThrottle]
+    """Authenticate a user and issue JWT tokens through HttpOnly cookies."""
+
     authentication_classes = []
+    parser_classes = [JSONParser]
+    throttle_classes = [UserLoginThrottle]
 
     @extend_schema(
-            request=UserLoginSerializer,
-            responses={
-                200: OpenApiResponse(
-                    description="Login successful"
-                ),
-            },
-        )
-
+        operation_id="auth_login",
+        summary="Log in",
+        description=(
+            "Authenticate using email and password. On success, access and "
+            "refresh JWT tokens are issued through HttpOnly cookies. "
+            "Tokens are not included in the JSON response."
+        ),
+        request=UserLoginSerializer,
+        responses={
+            200: _detail_response(
+                "Login successful",
+                "Login successful. Access and refresh tokens are set in HttpOnly cookies.",
+            ),
+            400: OpenApiResponse(
+                description="Invalid credentials or account cannot log in.",
+            ),
+            429: OpenApiResponse(
+                description="Too many login attempts.",
+            ),
+        },
+        auth=[],
+    )
     def post(self, request):
         serializer = UserLoginSerializer(
             data=request.data,
@@ -414,12 +537,33 @@ class UserLoginView(APIView):
 
 
 class CSRFTokenView(APIView):
+    """Set the CSRF cookie and return a confirmation response."""
+
     authentication_classes = []
     permission_classes = []
+    parser_classes = [JSONParser]
     throttle_classes = []
 
+    @extend_schema(
+        operation_id="auth_csrf_token",
+        summary="Get CSRF token",
+        description=(
+            "Sets the CSRF cookie and returns a confirmation message. "
+            "The CSRF cookie is used by the client for subsequent "
+            "state-changing requests."
+        ),
+        request=None,
+        responses={
+            200: _detail_response(
+                "CSRF cookie set successfully.",
+                "CSRF cookie was set successfully.",
+            ),
+        },
+        auth=[],
+    )
     def get(self, request):
         get_token(request)
+
         return Response(
             {"detail": "CSRF cookie set successfully."},
             status=status.HTTP_200_OK,
@@ -427,10 +571,30 @@ class CSRFTokenView(APIView):
 
 
 class UserLogoutView(APIView):
+    """Revoke the current session and delete authentication cookies."""
 
     authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
 
+    @extend_schema(
+        operation_id="auth_logout",
+        summary="Log out",
+        description=(
+            "Revoke the authenticated user's current session and delete "
+            "the access and refresh token cookies."
+        ),
+        request=None,
+        responses={
+            200: _detail_response(
+                "Logout successful.",
+                "Logout successful and authentication cookies deleted.",
+            ),
+            401: OpenApiResponse(
+                description="Authentication failed.",
+            ),
+        },
+    )
     def post(self, request):
         session_id = UUID(str(request.auth["sid"]))
 
@@ -452,11 +616,12 @@ class UserLogoutView(APIView):
 class RefreshAccessTokenView(APIView):
     """
     Refresh access and refresh tokens using the refresh token
-    stored in an HTTP-only cookie.
+    stored in an HttpOnly cookie.
     """
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    parser_classes = [JSONParser]
 
     def enforce_csrf(self, request):
         check = CSRFCheck(lambda request: None)
@@ -467,18 +632,29 @@ class RefreshAccessTokenView(APIView):
             raise PermissionDenied(f"CSRF Failed: {reason}")
 
     @extend_schema(
+        operation_id="auth_refresh",
+        summary="Refresh authentication tokens",
+        description=(
+            "Rotate the access and refresh tokens using the refresh token "
+            "stored in an HttpOnly cookie. A valid CSRF token is required. "
+            "New tokens are returned through HttpOnly cookies, not in the "
+            "JSON response."
+        ),
         request=None,
         responses={
-            200: OpenApiResponse(
-                description="Access token refreshed successfully."
+            200: _detail_response(
+                "Access token refreshed successfully.",
+                "Tokens refreshed successfully and authentication cookies updated.",
             ),
-            401: OpenApiResponse(
-                description="Refresh token is invalid or account is unavailable."
+            401: _detail_response(
+                "Refresh token is invalid or account is unavailable.",
+                "Refresh token is missing, invalid, expired, blacklisted, or the account is unavailable.",
             ),
             403: OpenApiResponse(
-                description="CSRF validation failed."
+                description="CSRF validation failed.",
             ),
         },
+        auth=[],
     )
     def post(self, request):
         refresh_cookie_name = settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"]
@@ -564,11 +740,13 @@ class RefreshAccessTokenView(APIView):
 class UserChangePasswordView(APIView):
     """
     Change the authenticated user's password.
-    All existing refresh tokens are revoked after a successful change.
+
+    All existing sessions are revoked after a successful password change.
     """
 
     authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
 
     def enforce_csrf(self, request):
         check = CSRFCheck(lambda request: None)
@@ -579,19 +757,28 @@ class UserChangePasswordView(APIView):
             raise PermissionDenied(f"CSRF Failed: {reason}")
 
     @extend_schema(
+        operation_id="auth_change_password",
+        summary="Change password",
+        description=(
+            "Change the authenticated user's password. A valid CSRF token "
+            "is required. All existing sessions are revoked after a "
+            "successful password change, and authentication cookies are "
+            "deleted. The user must log in again."
+        ),
         request=UserChangePasswordSerializer,
         responses={
-            200: OpenApiResponse(
-                description="Password changed successfully."
+            200: _detail_response(
+                "Password changed successfully. Please log in again.",
+                "Password changed successfully. Authentication cookies deleted.",
             ),
             400: OpenApiResponse(
-                description="Password validation failed."
+                description="Current password or new password validation failed.",
             ),
             401: OpenApiResponse(
-                description="Authentication failed."
+                description="Authentication failed.",
             ),
             403: OpenApiResponse(
-                description="CSRF validation failed."
+                description="CSRF validation failed or account is not active.",
             ),
         },
     )
@@ -635,6 +822,7 @@ class UserChangePasswordView(APIView):
                 )
 
                 revoke_all_user_sessions(user)
+
             response = Response(
                 {
                     "detail": (
@@ -666,21 +854,30 @@ class ForgotPasswordView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    parser_classes = [JSONParser]
     throttle_classes = [ForgotPasswordThrottle]
 
     @extend_schema(
+        operation_id="auth_forgot_password",
+        summary="Request password reset",
+        description=(
+            "Request a password reset email. A generic response is returned "
+            "regardless of account eligibility to prevent account enumeration."
+        ),
         request=ForgotPasswordSerializer,
         responses={
-            200: OpenApiResponse(
-                description="If the account is eligible, a password reset email will be sent."
+            200: _detail_response(
+                "If the account is eligible, a password reset email will be sent.",
+                "Generic response returned regardless of account eligibility.",
             ),
             400: OpenApiResponse(
-                description="Invalid request data."
+                description="Invalid request data.",
             ),
             429: OpenApiResponse(
-                description="Too many requests."
+                description="Too many password reset requests.",
             ),
         },
+        auth=[],
     )
     def post(self, request):
         serializer = ForgotPasswordSerializer(data=request.data)
@@ -748,28 +945,39 @@ class ResetPasswordView(APIView):
     - ACTIVE
     - PENDING_VERIFICATION
 
-    The account status and email verification timestamp remain unchanged.
-    All existing refresh tokens are revoked after a successful reset.
+    Account status and email verification timestamp remain unchanged.
+    All existing sessions are revoked after a successful reset.
     No authentication cookies or JWT tokens are issued.
     """
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    parser_classes = [JSONParser]
     throttle_classes = [ResetPasswordThrottle]
 
     @extend_schema(
+        operation_id="auth_reset_password",
+        summary="Reset password",
+        description=(
+            "Reset a user's password using a signed, single-use token. "
+            "The account status and email verification timestamp remain "
+            "unchanged. All existing sessions are revoked after a successful "
+            "reset. The user must log in with the new password."
+        ),
         request=ResetPasswordSerializer,
         responses={
-            200: OpenApiResponse(
-                description="Password reset successfully."
+            200: _detail_response(
+                "Password reset successfully. Please log in with your new password.",
+                "Password reset successfully. Existing sessions revoked.",
             ),
             400: OpenApiResponse(
-                description="Invalid or expired token or invalid password."
+                description="Invalid or expired token or invalid password.",
             ),
             429: OpenApiResponse(
-                description="Too many requests."
+                description="Too many password reset attempts.",
             ),
         },
+        auth=[],
     )
     def post(self, request):
         serializer = ResetPasswordSerializer(data=request.data)
@@ -874,8 +1082,27 @@ class ResetPasswordView(APIView):
 
 
 class UserMeView(APIView):
-    permission_classes = [IsAuthenticated]
+    """
+    Retrieve or partially update the authenticated user's account and profile.
+    """
 
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser]
+
+    @extend_schema(
+        operation_id="auth_me_retrieve",
+        summary="Get current user",
+        description=(
+            "Retrieve the authenticated user's account and profile information."
+        ),
+        request=None,
+        responses={
+            200: UserMeSerializer,
+            401: OpenApiResponse(
+                description="Authentication failed.",
+            ),
+        },
+    )
     def get(self, request):
         serializer = UserMeSerializer(
             instance=request.user,
@@ -884,6 +1111,26 @@ class UserMeView(APIView):
 
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @extend_schema(
+        operation_id="auth_me_update",
+        summary="Update current user profile",
+        description=(
+            "Partially update the authenticated user's account and profile "
+            "information. Only provided fields are updated. Use "
+            "multipart/form-data when uploading an avatar; JSON is supported "
+            "for other profile fields."
+        ),
+        request=UserMeSerializer,
+        responses={
+            200: UserMeSerializer,
+            400: OpenApiResponse(
+                description="Invalid profile data or avatar upload.",
+            ),
+            401: OpenApiResponse(
+                description="Authentication failed.",
+            ),
+        },
+    )
     def patch(self, request):
         serializer = UserMeSerializer(
             instance=request.user,
@@ -902,18 +1149,24 @@ class UserMeView(APIView):
 
 
 class UserSessionListView(APIView):
-    """
-    List all active sessions belonging to the authenticated user.
-    """
+    """List all active sessions belonging to the authenticated user."""
 
     authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
 
     @extend_schema(
+        operation_id="auth_sessions_list",
+        summary="List active sessions",
+        description=(
+            "List all non-revoked, non-expired sessions belonging "
+            "to the authenticated user."
+        ),
+        request=None,
         responses={
             200: UserSessionSerializer(many=True),
             401: OpenApiResponse(
-                description="Authentication failed."
+                description="Authentication failed.",
             ),
         },
     )
@@ -937,23 +1190,30 @@ class UserSessionListView(APIView):
 
 
 class UserSessionRevokeView(APIView):
-    """
-    Revoke one session belonging to the authenticated user.
-    """
+    """Revoke one session belonging to the authenticated user."""
 
     authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
 
     @extend_schema(
+        operation_id="auth_session_revoke",
+        summary="Revoke a session",
+        description=(
+            "Revoke a specific session belonging to the authenticated user. "
+            "The session identifier must be a UUID."
+        ),
+        request=None,
         responses={
             204: OpenApiResponse(
-                description="Session revoked successfully."
+                description="Session revoked successfully.",
             ),
             401: OpenApiResponse(
-                description="Authentication failed."
+                description="Authentication failed.",
             ),
-            404: OpenApiResponse(
-                description="Session not found."
+            404: _detail_response(
+                "Session not found.",
+                "The requested session does not exist or does not belong to the user.",
             ),
         },
     )
@@ -973,20 +1233,42 @@ class UserSessionRevokeView(APIView):
 
 
 class UserLogoutAllSessionsView(APIView):
-    """
-    Revoke all sessions belonging to the authenticated user.
-    """
+    """Revoke all sessions belonging to the authenticated user."""
 
     authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
 
     @extend_schema(
+        operation_id="auth_logout_all_sessions",
+        summary="Log out from all sessions",
+        description=(
+            "Revoke all sessions belonging to the authenticated user and "
+            "delete the access and refresh token cookies."
+        ),
+        request=None,
         responses={
             200: OpenApiResponse(
-                description="All sessions revoked successfully."
+                response={
+                    "type": "object",
+                    "properties": {
+                        "detail": {
+                            "type": "string",
+                            "example": (
+                                "All sessions have been revoked successfully."
+                            ),
+                        },
+                        "revoked_count": {
+                            "type": "integer",
+                            "example": 3,
+                        },
+                    },
+                    "required": ["detail", "revoked_count"],
+                },
+                description="All sessions revoked successfully.",
             ),
             401: OpenApiResponse(
-                description="Authentication failed."
+                description="Authentication failed.",
             ),
         },
     )
