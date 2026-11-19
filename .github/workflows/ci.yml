@@ -6,12 +6,14 @@ on:
       - main
       - develop
       - users
+      - organizations
 
   pull_request:
     branches:
       - main
       - develop
       - users
+      - organizations
 
   workflow_dispatch:
 
