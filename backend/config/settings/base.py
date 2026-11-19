@@ -33,6 +33,7 @@ ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=[])
 LOCAL_APPS = [
     "common.apps.CommonConfig",
     'apps.users',
+    "apps.outbox.apps.OutboxConfig",
 ]
 
 THIRD_PARTY_APPS = [
@@ -44,6 +45,7 @@ THIRD_PARTY_APPS = [
     'django_celery_beat',
     'django_celery_results',
     "rest_framework_simplejwt.token_blacklist",
+    "drf_spectacular",
 ]
 
 INSTALLED_APPS = [
@@ -211,7 +213,26 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'user_register_throttle':'10/minute',
         'user_login_throttle':'10/minute',
+        "email_verification": "10/minute",
+        'email_verification_resend': '5/minute',
+        "forgot_password": "5/hour",
+        "reset_password": "10/hour",
     },
+}
+
+# =========================
+# Debug Toolbar Tools
+# =========================
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Taskora API",
+    "DESCRIPTION": "REST API documentation for Taskora.",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SERVE_PERMISSIONS": [
+        "rest_framework.permissions.AllowAny",
+    ],
+    "SERVE_AUTHENTICATION": [],
 }
 
 # =========================
@@ -232,6 +253,15 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
+CELERY_BEAT_SCHEDULE = {
+    "process-outbox-events": {
+        "task": "apps.outbox.tasks.process_outbox_events",
+        "schedule": 10.0,
+        "kwargs": {
+            "batch_size": 100,
+        },
+    },
+}
 
 CSRF_COOKIE_NAME = "csrftoken"
 CSRF_HEADER_NAME = "HTTP_X_CSRFTOKEN"

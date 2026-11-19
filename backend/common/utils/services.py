@@ -3,16 +3,10 @@ from django.conf import settings
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
-
-
-def generate_access_refresh_tokens(user):
-    """
-    Generate access and refresh JWT tokens for a user.
-    """
-    refresh = RefreshToken.for_user(user)
-    access = refresh.access_token
-
-    return str(access), str(refresh)
+from rest_framework_simplejwt.token_blacklist.models import (
+    BlacklistedToken,
+    OutstandingToken,
+)
 
 
 class TokenCookieManager:
@@ -88,3 +82,25 @@ class TokenCookieManager:
             return True
         except TokenError:
             return False
+
+    @staticmethod
+    def blacklist_user_refresh_tokens(user) -> int:
+        """
+        Blacklist all outstanding refresh tokens belonging to a user.
+        """
+        outstanding_tokens = OutstandingToken.objects.filter(
+            user=user,
+            blacklistedtoken__isnull=True,
+        )
+
+        tokens_to_blacklist = [
+            BlacklistedToken(token=token)
+            for token in outstanding_tokens
+        ]
+
+        BlacklistedToken.objects.bulk_create(
+            tokens_to_blacklist,
+            ignore_conflicts=True,
+        )
+
+        return len(tokens_to_blacklist)

@@ -11,7 +11,6 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1", "web", '0.0.0.0']
 
 # Django Debug Toolbar
 INSTALLED_APPS += [
-    'drf_spectacular',
     "debug_toolbar",
 ]
 
@@ -20,15 +19,9 @@ MIDDLEWARE.insert(
     "debug_toolbar.middleware.DebugToolbarMiddleware",
 )
 
-# Debug Toolbar access
-SPECTACULAR_SETTINGS = {
-    'TITLE': 'API Documentation',
-    'DESCRIPTION': 'API documentation for Your Project',
-    'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': False,
-    'SERVE_PERMISSIONS': ['rest_framework.permissions.AllowAny'],
-    'SERVE_AUTHENTICATION': []
-}
+MIDDLEWARE += [
+    "common.middleware.query_middleware.QueryCountMiddleware",
+]
 
 INTERNAL_IPS = [
     '127.0.0.1',
@@ -42,3 +35,8 @@ DEBUG_TOOLBAR_CONFIG = {
 
 # Email Backend
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+DEFAULT_FROM_EMAIL = "noreply@taskora.local"
+PASSWORD_RESET_URL = env(
+    "PASSWORD_RESET_URL",
+    default="http://localhost:3000/reset-password",
+)
