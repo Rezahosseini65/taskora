@@ -1,10 +1,9 @@
-
-import uuid
-
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.utils import timezone
+
 from apps.organizations.models import (
     MembershipStatus,
     Organization,
@@ -139,6 +138,20 @@ class OrganizationModelTests(TestCase):
                     name="Another Company",
                     slug="taskora",
                 )
+
+    def test_save_rejects_name_that_cannot_generate_slug(self):
+        user = User.objects.create_user(
+            email="slug-test@example.com",
+            password="test-password-123",
+        )
+
+        organization = Organization(
+            name="!!!",
+            created_by=user,
+        )
+
+        with self.assertRaises(ValidationError):
+            organization.save()
 
 
 class OrganizationMembershipModelTests(TestCase):

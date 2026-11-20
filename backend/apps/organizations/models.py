@@ -187,9 +187,8 @@ class Organization(models.Model):
 
     def save(self, *args, **kwargs):
         """
-        Normalize the organization name and generate a slug when missing.
-
-        Database constraints remain the final authority for uniqueness.
+        Normalize the organization name and generate a valid slug
+        when one is not provided.
         """
         self.name = self.name.strip() if self.name else ""
 
@@ -198,6 +197,14 @@ class Organization(models.Model):
         if not self.slug:
             self.slug = self.generate_slug()
             generated_slug = True
+
+        if not self.slug:
+            raise ValidationError({
+                "slug": _(
+                    "A valid slug could not be generated from the "
+                    "organization name. Please provide a slug manually."
+                )
+            })
 
         update_fields = kwargs.get("update_fields")
 
