@@ -1,6 +1,7 @@
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import F
 from django.db.models.functions import Lower, Trim
@@ -74,6 +75,13 @@ class Board(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.workspace})"
+
+    def clean(self):
+        super().clean()
+        self.name = self.name.strip()
+
+        if not self.name:
+            raise ValidationError({"name": "Board name cannot be empty."})
 
     def save(self, *args, **kwargs):
         self.name = self.name.strip()
