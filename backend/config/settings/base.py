@@ -34,6 +34,7 @@ LOCAL_APPS = [
     "common.apps.CommonConfig",
     'apps.users',
     "apps.outbox.apps.OutboxConfig",
+    "apps.organizations.apps.OrganizationsConfig",
 ]
 
 THIRD_PARTY_APPS = [
