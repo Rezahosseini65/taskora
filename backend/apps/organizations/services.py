@@ -2,6 +2,12 @@ from django.db import transaction
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from apps.workspaces.models import (
+    MembershipStatus as WorkspaceMembershipStatus,
+    WorkspaceMembership,
+    WorkspaceRole,
+)
+
 from .models import (
     MembershipStatus,
     Organization,
@@ -92,8 +98,11 @@ def leave_organization(*, organization, user):
     """
     Allow an active member to leave an organization.
 
-    Owners must transfer ownership before leaving.
-    Membership records are retained with LEFT status.
+    Users must transfer ownership of all their workspaces
+    before leaving the organization.
+
+    All active workspace memberships become LEFT.
+    Suspended and already-left memberships remain unchanged.
     """
     organization = Organization.objects.select_for_update().get(
         pk=organization.pk,
@@ -118,6 +127,30 @@ def leave_organization(*, organization, user):
         raise ValidationError(
             "Organization owners must transfer ownership before leaving."
         )
+
+    workspace_memberships = list(
+        WorkspaceMembership.objects.select_for_update().filter(
+            workspace__organization=organization,
+            user=user,
+            status=WorkspaceMembershipStatus.ACTIVE,
+        )
+    )
+
+    owned_workspaces = [
+        workspace_membership
+        for workspace_membership in workspace_memberships
+        if workspace_membership.role == WorkspaceRole.OWNER
+    ]
+
+    if owned_workspaces:
+        raise ValidationError(
+            "You must transfer ownership of all your workspaces "
+            "before leaving the organization."
+        )
+
+    for workspace_membership in workspace_memberships:
+        workspace_membership.status = WorkspaceMembershipStatus.LEFT
+        workspace_membership.save(update_fields=["status"])
 
     membership.status = MembershipStatus.LEFT
     membership.save(update_fields=["status"])
