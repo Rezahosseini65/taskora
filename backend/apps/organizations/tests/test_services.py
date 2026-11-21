@@ -25,6 +25,15 @@ from apps.organizations.services import (
     reactivate_organization_membership,
     change_organization_member_role
 )
+from apps.workspaces.models import (
+    MembershipStatus as WorkspaceMembershipStatus,
+    WorkspaceRole,
+)
+from apps.workspaces.services import (
+    create_workspace,
+    join_workspace,
+    transfer_workspace_ownership,
+)
 from apps.users.models import User
 
 
@@ -261,6 +270,7 @@ class JoinOrganizationServiceTests(TestCase):
         self.assertEqual(membership.status, MembershipStatus.ACTIVE)
         self.assertEqual(membership.role, OrganizationRole.MEMBER)
 
+
 class LeaveOrganizationServiceTests(TestCase):
     def setUp(self):
         self.owner = User.objects.create_user(
@@ -282,6 +292,14 @@ class LeaveOrganizationServiceTests(TestCase):
         self.membership = join_organization(
             organization=self.organization,
             user=self.member,
+        )
+
+    def create_public_workspace(self, name):
+        return create_workspace(
+            organization=self.organization,
+            name=name,
+            created_by=self.owner,
+            membership_policy=MembershipPolicy.PUBLIC,
         )
 
     def test_active_member_can_leave(self):
@@ -326,6 +344,118 @@ class LeaveOrganizationServiceTests(TestCase):
                 user=self.member,
             )
 
+    def test_leaving_organization_marks_active_workspace_memberships_as_left(self):
+        workspace_one = self.create_public_workspace("Workspace One")
+        workspace_two = self.create_public_workspace("Workspace Two")
+
+        membership_one = join_workspace(
+            workspace=workspace_one,
+            user=self.member,
+        )
+        membership_two = join_workspace(
+            workspace=workspace_two,
+            user=self.member,
+        )
+
+        leave_organization(
+            organization=self.organization,
+            user=self.member,
+        )
+
+        membership_one.refresh_from_db()
+        membership_two.refresh_from_db()
+
+        self.assertEqual(
+            membership_one.status,
+            WorkspaceMembershipStatus.LEFT,
+        )
+        self.assertEqual(
+            membership_two.status,
+            WorkspaceMembershipStatus.LEFT,
+        )
+
+    def test_leaving_organization_preserves_suspended_and_left_workspace_memberships(self):
+        active_workspace = self.create_public_workspace("Active Workspace")
+        suspended_workspace = self.create_public_workspace("Suspended Workspace")
+        left_workspace = self.create_public_workspace("Left Workspace")
+
+        active_membership = join_workspace(
+            workspace=active_workspace,
+            user=self.member,
+        )
+        suspended_membership = join_workspace(
+            workspace=suspended_workspace,
+            user=self.member,
+        )
+        left_membership = join_workspace(
+            workspace=left_workspace,
+            user=self.member,
+        )
+
+        suspended_membership.status = WorkspaceMembershipStatus.SUSPENDED
+        suspended_membership.save(update_fields=["status"])
+
+        left_membership.status = WorkspaceMembershipStatus.LEFT
+        left_membership.save(update_fields=["status"])
+
+        leave_organization(
+            organization=self.organization,
+            user=self.member,
+        )
+
+        active_membership.refresh_from_db()
+        suspended_membership.refresh_from_db()
+        left_membership.refresh_from_db()
+
+        self.assertEqual(
+            active_membership.status,
+            WorkspaceMembershipStatus.LEFT,
+        )
+        self.assertEqual(
+            suspended_membership.status,
+            WorkspaceMembershipStatus.SUSPENDED,
+        )
+        self.assertEqual(
+            left_membership.status,
+            WorkspaceMembershipStatus.LEFT,
+        )
+
+    def test_workspace_owner_cannot_leave_organization_before_transferring_ownership(self):
+        workspace = self.create_public_workspace("Owned Workspace")
+
+        workspace_membership = join_workspace(
+            workspace=workspace,
+            user=self.member,
+        )
+
+        transfer_workspace_ownership(
+            workspace,
+            self.owner,
+            self.member,
+        )
+
+        with self.assertRaises(ValidationError):
+            leave_organization(
+                organization=self.organization,
+                user=self.member,
+            )
+
+        self.membership.refresh_from_db()
+        workspace_membership.refresh_from_db()
+
+        self.assertEqual(
+            self.membership.status,
+            MembershipStatus.ACTIVE,
+        )
+        self.assertEqual(
+            workspace_membership.status,
+            WorkspaceMembershipStatus.ACTIVE,
+        )
+        self.assertEqual(
+            workspace_membership.role,
+            WorkspaceRole.OWNER,
+        )
+
     def test_suspended_member_cannot_leave(self):
         self.membership.status = MembershipStatus.SUSPENDED
         self.membership.save(update_fields=["status"])
@@ -335,6 +465,79 @@ class LeaveOrganizationServiceTests(TestCase):
                 organization=self.organization,
                 user=self.member,
             )
+
+    def test_member_cannot_leave_when_owning_multiple_workspaces(self):
+        workspace_one = self.create_public_workspace("Workspace One")
+        workspace_two = self.create_public_workspace("Workspace Two")
+
+        join_workspace(workspace=workspace_one, user=self.member)
+        join_workspace(workspace=workspace_two, user=self.member)
+
+        transfer_workspace_ownership(
+            workspace_one,
+            self.owner,
+            self.member,
+        )
+        transfer_workspace_ownership(
+            workspace_two,
+            self.owner,
+            self.member,
+        )
+
+        with self.assertRaises(ValidationError):
+            leave_organization(
+                organization=self.organization,
+                user=self.member,
+            )
+
+        self.membership.refresh_from_db()
+
+        self.assertEqual(
+            self.membership.status,
+            MembershipStatus.ACTIVE,
+        )
+
+    def test_failed_organization_leave_does_not_change_workspace_memberships(self):
+        workspace_one = self.create_public_workspace("Workspace One")
+        workspace_two = self.create_public_workspace("Workspace Two")
+
+        membership_one = join_workspace(
+            workspace=workspace_one,
+            user=self.member,
+        )
+        membership_two = join_workspace(
+            workspace=workspace_two,
+            user=self.member,
+        )
+
+        transfer_workspace_ownership(
+            workspace_one,
+            self.owner,
+            self.member,
+        )
+
+        with self.assertRaises(ValidationError):
+            leave_organization(
+                organization=self.organization,
+                user=self.member,
+            )
+
+        self.membership.refresh_from_db()
+        membership_one.refresh_from_db()
+        membership_two.refresh_from_db()
+
+        self.assertEqual(
+            self.membership.status,
+            MembershipStatus.ACTIVE,
+        )
+        self.assertEqual(
+            membership_one.status,
+            WorkspaceMembershipStatus.ACTIVE,
+        )
+        self.assertEqual(
+            membership_two.status,
+            WorkspaceMembershipStatus.ACTIVE,
+        )
 
 
 class TransferOrganizationOwnershipTests(TestCase):
