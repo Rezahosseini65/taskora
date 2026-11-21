@@ -35,6 +35,7 @@ LOCAL_APPS = [
     'apps.users',
     "apps.outbox.apps.OutboxConfig",
     "apps.organizations.apps.OrganizationsConfig",
+    "apps.workspaces.apps.WorkspacesConfig",
 ]
 
 THIRD_PARTY_APPS = [
