@@ -16,6 +16,13 @@ class ActiveBoardListManager(models.Manager):
         return BoardListQuerySet(self.model, using=self._db).active()
 
 
+DEFAULT_BOARD_LISTS = (
+    {"name": "To Do", "position": 1},
+    {"name": "In Progress", "position": 2},
+    {"name": "Done", "position": 3},
+)
+
+
 class BoardList(models.Model):
     id = models.UUIDField(
         primary_key=True,
