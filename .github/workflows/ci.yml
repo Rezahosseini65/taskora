@@ -8,6 +8,7 @@ on:
       - users
       - organizations
       - workspaces
+      - boards
 
   pull_request:
     branches:
@@ -16,6 +17,7 @@ on:
       - users
       - organizations
       - workspaces
+      - boards
 
   workflow_dispatch:
 
