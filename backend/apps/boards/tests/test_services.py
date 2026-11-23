@@ -142,6 +142,41 @@ class CreateBoardTests(BoardServiceTestCase):
             Board.objects.filter(pk=board.pk).exists()
         )
 
+    def test_creating_board_creates_three_default_lists(self):
+        board = create_board(
+            workspace=self.workspace,
+            name="Development",
+            created_by=self.owner,
+        )
+
+        lists = list(
+            board.lists.order_by("position")
+        )
+
+        self.assertEqual(len(lists), 3)
+
+        self.assertEqual(
+            [(item.name, item.position) for item in lists],
+            [
+                ("To Do", 1),
+                ("In Progress", 2),
+                ("Done", 3),
+            ],
+        )
+
+    def test_default_lists_are_created_as_active_lists(self):
+        board = create_board(
+            workspace=self.workspace,
+            name="Development",
+            created_by=self.owner,
+        )
+
+        lists = board.lists.order_by("position")
+
+        for board_list in lists:
+            self.assertFalse(board_list.is_archived)
+            self.assertIsNone(board_list.deleted_at)
+
 
 class UpdateBoardTests(BoardServiceTestCase):
     def setUp(self):

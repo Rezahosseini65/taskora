@@ -37,6 +37,7 @@ LOCAL_APPS = [
     "apps.organizations.apps.OrganizationsConfig",
     "apps.workspaces.apps.WorkspacesConfig",
     "apps.boards.apps.BoardsConfig",
+    "apps.boardlists.apps.BoardlistsConfig",
 ]
 
 THIRD_PARTY_APPS = [

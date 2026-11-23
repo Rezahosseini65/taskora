@@ -1,6 +1,7 @@
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
+from apps.boardlists.models import BoardList, DEFAULT_BOARD_LISTS
 from apps.organizations.models import (
     MembershipStatus as OrganizationMembershipStatus,
     Organization,
@@ -124,6 +125,17 @@ def create_board(
 
     board.full_clean()
     board.save()
+
+    BoardList.objects.bulk_create(
+        [
+            BoardList(
+                board=board,
+                name=item["name"],
+                position=item["position"],
+            )
+            for item in DEFAULT_BOARD_LISTS
+        ]
+    )
 
     return board
 

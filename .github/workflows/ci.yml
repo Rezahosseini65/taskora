@@ -9,6 +9,7 @@ on:
       - organizations
       - workspaces
       - boards
+      - boardlist
 
   pull_request:
     branches:
@@ -18,6 +19,7 @@ on:
       - organizations
       - workspaces
       - boards
+      - boardlist
 
   workflow_dispatch:
 
