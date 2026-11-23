@@ -10,6 +10,7 @@ on:
       - workspaces
       - boards
       - boardlist
+      - task
 
   pull_request:
     branches:
@@ -20,6 +21,7 @@ on:
       - workspaces
       - boards
       - boardlist
+      - task
 
   workflow_dispatch:
 
